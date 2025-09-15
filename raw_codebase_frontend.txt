@@ -1,0 +1,3639 @@
+// ========== COMPLETE SOULSEER FRONTEND - PRODUCTION READY ==========
+
+// ===== COMPLETE SVELTEKIT ROUTES WITH ALL PAGES =====
+
+// frontend/src/routes/+layout.svelte
+<script>
+  import { onMount, onDestroy } from 'svelte';
+  import { Clerk } from '@clerk/clerk-js';
+  import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
+  import { 
+    userStore, 
+    notificationStore, 
+    cartStore, 
+    webSocketStore,
+    balanceStore 
+  } from '$lib/stores';
+  import NotificationToast from '$lib/components/NotificationToast.svelte';
+  import '../app.css';
+  
+  const clerkPubKey = import.meta.env.PUBLIC_CLERK_PUBLISHABLE_KEY;
+  let clerk;
+  let ws;
+  
+  onMount(async () => {
+    // Initialize Clerk
+    clerk = new Clerk(clerkPubKey);
+    await clerk.load();
+    
+    if (clerk.user) {
+      userStore.set({
+        id: clerk.user.id,
+        email: clerk.user.emailAddresses[0]?.emailAddress,
+        role: clerk.user.publicMetadata?.role || 'client'
+      });
+      
+      // Initialize WebSocket
+      initWebSocket(clerk.user.id);
+      
+      // Load user data
+      await loadUserData(clerk.user.id);
+    }
+    
+    // Generate stars background
+    generateStars();
+  });
+  
+  onDestroy(() => {
+    if (ws) {
+      ws.close();
+    }
+  });
+  
+  function initWebSocket(userId) {
+    ws = new WebSocket(`${import.meta.env.PUBLIC_WS_URL}/ws/${userId}`);
+    
+    ws.onopen = () => {
+      console.log('WebSocket connected');
+      webSocketStore.set(ws);
+    };
+    
+    ws.onmessage = (event) => {
+      const message = JSON.parse(event.data);
+      handleWebSocketMessage(message);
+    };
+    
+    ws.onerror = (error) => {
+      console.error('WebSocket error:', error);
+    };
+    
+    ws.onclose = () => {
+      console.log('WebSocket disconnected');
+      // Reconnect after 3 seconds
+      setTimeout(() => initWebSocket(userId), 3000);
+    };
+  }
+  
+  function handleWebSocketMessage(message) {
+    switch(message.type) {
+      case 'notification':
+        notificationStore.addNotification(message);
+        break;
+      case 'billing_update':
+        balanceStore.update(message.remaining_balance);
+        break;
+      case 'new_message':
+        notificationStore.incrementUnread();
+        break;
+      case 'reading_request':
+        if ($userStore.role === 'reader') {
+          notificationStore.addNotification({
+            type: 'reading_request',
+            title: 'New Reading Request',
+            message: 'A client is requesting a reading',
+            action: () => goto(`/dashboard/reader/requests`)
+          });
+        }
+        break;
+    }
+  }
+  
+  async function loadUserData(userId) {
+    const response = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/users/${userId}`);
+    const data = await response.json();
+    
+    if (data.role === 'client') {
+      balanceStore.set(data.balance);
+    }
+  }
+  
+  function generateStars() {
+    const starsContainer = document.getElementById('stars');
+    if (!starsContainer) return;
+    
+    for (let i = 0; i < 150; i++) {
+      const star = document.createElement('div');
+      star.className = 'star';
+      star.style.width = Math.random() * 3 + 'px';
+      star.style.height = star.style.width;
+      star.style.left = Math.random() * 100 + '%';
+      star.style.top = Math.random() * 100 + '%';
+      star.style.animationDelay = Math.random() * 3 + 's';
+      starsContainer.appendChild(star);
+    }
+  }
+  
+  async function logout() {
+    await clerk.signOut();
+    userStore.set(null);
+    goto('/');
+  }
+</script>
+
+<div class="mystical-bg min-h-screen">
+  <div class="stars" id="stars"></div>
+  
+  <nav class="bg-black/50 backdrop-blur-md border-b border-pink-500/30 sticky top-0 z-50">
+    <div class="max-w-7xl mx-auto px-4">
+      <div class="flex justify-between items-center h-16">
+        <div class="flex items-center space-x-8">
+          <a href="/" class="alex-brush text-4xl text-pink-500 glow">SoulSeer</a>
+          <div class="hidden md:flex space-x-6">
+            <a href="/" class:active={$page.url.pathname === '/'} class="nav-link">Home</a>
+            <a href="/about" class:active={$page.url.pathname === '/about'} class="nav-link">About</a>
+            <a href="/readings" class:active={$page.url.pathname === '/readings'} class="nav-link">Readings</a>
+            <a href="/live" class:active={$page.url.pathname === '/live'} class="nav-link">Live</a>
+            <a href="/shop" class:active={$page.url.pathname === '/shop'} class="nav-link">Shop</a>
+            <a href="/community" class:active={$page.url.pathname === '/community'} class="nav-link">Community</a>
+            <a href="/help" class:active={$page.url.pathname === '/help'} class="nav-link">Help</a>
+          </div>
+        </div>
+        <div class="flex items-center space-x-4">
+          {#if $userStore?.role === 'client'}
+            <div class="text-yellow-400">
+              Balance: ${$balanceStore.toFixed(2)}
+            </div>
+          {/if}
+          <a href="/messages" class="relative">
+            <svg class="w-6 h-6 text-white hover:text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+            </svg>
+            {#if $notificationStore.unreadMessages > 0}
+              <span class="absolute -top-2 -right-2 bg-pink-500 text-white text-xs rounded-full h-5 w-5 flex items-center justify-center">
+                {$notificationStore.unreadMessages}
+              </span>
+            {/if}
+          </a>
+          {#if $userStore}
+            <a href="/dashboard" class="nav-link">Dashboard</a>
+            <button on:click={logout} class="nav-link">Logout</button>
+          {:else}
+            <a href="/login" class="nav-link">Login</a>
+            <a href="/signup" class="btn-primary">Sign Up</a>
+          {/if}
+        </div>
+      </div>
+    </div>
+  </nav>
+  
+  <main class="relative z-10">
+    <slot />
+  </main>
+  
+  <footer class="bg-black/70 border-t border-pink-500/30 mt-20">
+    <div class="max-w-7xl mx-auto px-4 py-12">
+      <div class="grid grid-cols-1 md:grid-cols-4 gap-8">
+        <div>
+          <h3 class="alex-brush text-3xl text-pink-500 mb-4">SoulSeer</h3>
+          <p class="text-gray-400">A Community of Gifted Psychics</p>
+          <p class="text-gray-500 mt-2">Founded by Emilynn</p>
+        </div>
+        <div>
+          <h4 class="text-pink-400 mb-4">Quick Links</h4>
+          <a href="/about" class="block text-gray-400 hover:text-pink-400 mb-2">About Us</a>
+          <a href="/apply-reader" class="block text-gray-400 hover:text-pink-400 mb-2">Become a Reader</a>
+          <a href="/faq" class="block text-gray-400 hover:text-pink-400 mb-2">FAQ</a>
+          <a href="/contact" class="block text-gray-400 hover:text-pink-400">Contact</a>
+        </div>
+        <div>
+          <h4 class="text-pink-400 mb-4">Legal</h4>
+          <a href="/terms" class="block text-gray-400 hover:text-pink-400 mb-2">Terms of Service</a>
+          <a href="/privacy" class="block text-gray-400 hover:text-pink-400 mb-2">Privacy Policy</a>
+          <a href="/policies" class="block text-gray-400 hover:text-pink-400 mb-2">All Policies</a>
+          <a href="/dmca" class="block text-gray-400 hover:text-pink-400">DMCA</a>
+        </div>
+        <div>
+          <h4 class="text-pink-400 mb-4">Support</h4>
+          <a href="/help" class="block text-gray-400 hover:text-pink-400 mb-2">Help Center</a>
+          <a href="/contact" class="block text-gray-400 hover:text-pink-400 mb-2">Contact Support</a>
+          <p class="text-gray-500 mt-4">support@soulseer.com</p>
+        </div>
+      </div>
+      <div class="mt-8 pt-8 border-t border-pink-500/20 text-center text-gray-500">
+        <p>© 2025 SoulSeer. All rights reserved.</p>
+      </div>
+    </div>
+  </footer>
+</div>
+
+<NotificationToast />
+
+<style>
+  .nav-link {
+    @apply text-white hover:text-pink-400 transition-colors;
+  }
+  
+  .nav-link.active {
+    @apply text-pink-400;
+  }
+</style>
+
+---
+// frontend/src/routes/+page.svelte (HOME PAGE - COMPLETE)
+<script>
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import ReaderCard from '$lib/components/ReaderCard.svelte';
+  import StreamCard from '$lib/components/StreamCard.svelte';
+  import ProductCard from '$lib/components/ProductCard.svelte';
+  import { userStore } from '$lib/stores';
+  
+  let onlineReaders = [];
+  let activeStreams = [];
+  let featuredProducts = [];
+  let loading = true;
+  
+  onMount(async () => {
+    await Promise.all([
+      loadOnlineReaders(),
+      loadActiveStreams(),
+      loadFeaturedProducts()
+    ]);
+    loading = false;
+  });
+  
+  async function loadOnlineReaders() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/readings/readers/online`);
+    const data = await res.json();
+    onlineReaders = data.readers || [];
+  }
+  
+  async function loadActiveStreams() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/streaming/active`);
+    const data = await res.json();
+    activeStreams = data.streams || [];
+  }
+  
+  async function loadFeaturedProducts() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/marketplace/products?featured=true`);
+    const data = await res.json();
+    featuredProducts = data.products || [];
+  }
+  
+  function requestInstantReading() {
+    if (!$userStore) {
+      goto('/login?redirect=/readings?type=instant');
+    } else {
+      goto('/readings?type=instant');
+    }
+  }
+  
+  function scheduleReading() {
+    if (!$userStore) {
+      goto('/login?redirect=/readings?type=scheduled');
+    } else {
+      goto('/readings?type=scheduled');
+    }
+  }
+</script>
+
+<div class="min-h-screen">
+  <!-- Hero Section -->
+  <section class="text-center py-16 px-4">
+    <h1 class="alex-brush text-6xl md:text-8xl text-pink-500 glow mb-8 animate-fade-in">
+      SoulSeer
+    </h1>
+    
+    <div class="max-w-4xl mx-auto mb-8">
+      <img 
+        src="https://i.postimg.cc/tRLSgCPb/HERO-IMAGE-1.jpg" 
+        alt="Mystical spiritual guidance" 
+        class="w-full rounded-lg shadow-2xl hover:shadow-pink-500/30 transition-shadow duration-500"
+      />
+    </div>
+    
+    <h2 class="text-3xl md:text-4xl mb-12 gold-glow font-playfair animate-fade-in-delay">
+      A Community of Gifted Psychics
+    </h2>
+    
+    <!-- Quick Action Buttons -->
+    <div class="flex flex-col sm:flex-row justify-center gap-4 mb-16">
+      <button 
+        on:click={requestInstantReading}
+        class="btn-primary pulse shadow-lg shadow-pink-500/30"
+      >
+        <span class="flex items-center justify-center">
+          <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+            <path d="M2 5a2 2 0 012-2h7a2 2 0 012 2v4a2 2 0 01-2 2H9l-3 3v-3H4a2 2 0 01-2-2V5z"/>
+            <path d="M15 7v2a4 4 0 01-4 4H9.828l-1.766 1.767c.28.149.599.233.938.233h2l3 3v-3h2a2 2 0 002-2V9a2 2 0 00-2-2h-1z"/>
+          </svg>
+          Instant Reading
+        </span>
+      </button>
+      <button 
+        on:click={scheduleReading}
+        class="btn-secondary shadow-lg"
+      >
+        <span class="flex items-center justify-center">
+          <svg class="w-5 h-5 mr-2" fill="currentColor" viewBox="0 0 20 20">
+            <path fill-rule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clip-rule="evenodd"/>
+          </svg>
+          Schedule Reading
+        </span>
+      </button>
+    </div>
+  </section>
+  
+  <!-- Online Readers Section -->
+  <section class="max-w-7xl mx-auto px-4 mb-16">
+    <h3 class="alex-brush text-4xl text-pink-400 mb-8 text-center">Available Now</h3>
+    
+    {#if loading}
+      <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+        {#each Array(4) as _}
+          <div class="bg-black/50 backdrop-blur-md rounded-lg p-4 animate-pulse">
+            <div class="aspect-square bg-gray-700 rounded-lg mb-4"></div>
+            <div class="h-4 bg-gray-700 rounded mb-2"></div>
+            <div class="h-3 bg-gray-700 rounded w-2/3"></div>
+          </div>
+        {/each}
+      </div>
+    {:else if onlineReaders.length > 0}
+      <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+        {#each onlineReaders.slice(0, 8) as reader}
+          <ReaderCard {reader} />
+        {/each}
+      </div>
+      {#if onlineReaders.length > 8}
+        <div class="text-center mt-8">
+          <a href="/readings" class="btn-secondary">
+            View All {onlineReaders.length} Online Readers
+          </a>
+        </div>
+      {/if}
+    {:else}
+      <div class="text-center py-12">
+        <p class="text-gray-400 text-lg mb-4">No readers are currently online</p>
+        <a href="/readings?type=scheduled" class="btn-secondary">
+          Schedule a Reading for Later
+        </a>
+      </div>
+    {/if}
+  </section>
+  
+  <!-- Live Streams Section -->
+  <section class="max-w-7xl mx-auto px-4 mb-16">
+    <h3 class="alex-brush text-4xl text-pink-400 mb-8 text-center">Live Streams</h3>
+    
+    {#if activeStreams.length > 0}
+      <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {#each activeStreams as stream}
+          <StreamCard {stream} />
+        {/each}
+      </div>
+      <div class="text-center mt-8">
+        <a href="/live" class="btn-secondary">
+          View All Streams
+        </a>
+      </div>
+    {:else}
+      <div class="text-center py-12 bg-black/30 backdrop-blur-md rounded-lg">
+        <svg class="w-16 h-16 mx-auto mb-4 text-pink-500/50" fill="currentColor" viewBox="0 0 20 20">
+          <path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z"/>
+        </svg>
+        <p class="text-gray-400 text-lg mb-4">No live streams at the moment</p>
+        <p class="text-gray-500">Check back later for live psychic readings and spiritual guidance</p>
+      </div>
+    {/if}
+  </section>
+  
+  <!-- Featured Products Section -->
+  <section class="max-w-7xl mx-auto px-4 mb-16">
+    <h3 class="alex-brush text-4xl text-pink-400 mb-8 text-center">Featured in Shop</h3>
+    
+    {#if featuredProducts.length > 0}
+      <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+        {#each featuredProducts.slice(0, 4) as product}
+          <ProductCard {product} />
+        {/each}
+      </div>
+      <div class="text-center mt-8">
+        <a href="/shop" class="btn-secondary">
+          Explore Full Shop
+        </a>
+      </div>
+    {:else}
+      <div class="text-center py-8">
+        <p class="text-gray-400">New products coming soon!</p>
+      </div>
+    {/if}
+  </section>
+  
+  <!-- Features Section -->
+  <section class="max-w-7xl mx-auto px-4 mb-16">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-8">
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center card-hover">
+        <div class="text-5xl mb-4">🔮</div>
+        <h4 class="text-xl text-pink-400 mb-3">Expert Psychics</h4>
+        <p class="text-gray-400">Carefully vetted readers with proven abilities</p>
+      </div>
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center card-hover">
+        <div class="text-5xl mb-4">💰</div>
+        <h4 class="text-xl text-pink-400 mb-3">Fair Pricing</h4>
+        <p class="text-gray-400">70% of earnings go directly to readers</p>
+      </div>
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center card-hover">
+        <div class="text-5xl mb-4">🛡️</div>
+        <h4 class="text-xl text-pink-400 mb-3">Secure & Private</h4>
+        <p class="text-gray-400">End-to-end encryption for all sessions</p>
+      </div>
+    </div>
+  </section>
+</div>
+
+<style>
+  @keyframes fade-in {
+    from { opacity: 0; transform: translateY(20px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  
+  .animate-fade-in {
+    animation: fade-in 1s ease-out;
+  }
+  
+  .animate-fade-in-delay {
+    animation: fade-in 1s ease-out 0.3s both;
+  }
+</style>
+
+---
+// frontend/src/routes/session/[id]/+page.svelte (COMPLETE VIDEO CALL INTERFACE)
+<script>
+  import { onMount, onDestroy } from 'svelte';
+  import { page } from '$app/stores';
+  import { goto } from '$app/navigation';
+  import { userStore, webSocketStore, balanceStore } from '$lib/stores';
+  import WebRTCManager from '$lib/webrtc/WebRTCManager';
+  import SessionTimer from '$lib/components/SessionTimer.svelte';
+  import ChatPanel from '$lib/components/ChatPanel.svelte';
+  import CallControls from '$lib/components/CallControls.svelte';
+  import PreCallCheck from '$lib/components/PreCallCheck.svelte';
+  import SessionSummary from '$lib/components/SessionSummary.svelte';
+  
+  let sessionId = $page.params.id;
+  let session = null;
+  let webrtcManager = null;
+  let localStream = null;
+  let remoteStream = null;
+  let connectionState = 'connecting';
+  let isMuted = false;
+  let isVideoOff = false;
+  let showChat = true;
+  let showPreCallCheck = true;
+  let showSummary = false;
+  let sessionSummary = null;
+  let reconnectAttempts = 0;
+  let billingInterval = null;
+  
+  onMount(async () => {
+    if (!$userStore) {
+      goto('/login');
+      return;
+    }
+    
+    await loadSession();
+    
+    if (session) {
+      webrtcManager = new WebRTCManager($webSocketStore, session);
+      webrtcManager.on('localStream', stream => localStream = stream);
+      webrtcManager.on('remoteStream', stream => remoteStream = stream);
+      webrtcManager.on('connectionStateChange', state => handleConnectionState(state));
+      webrtcManager.on('error', error => handleError(error));
+    }
+  });
+  
+  onDestroy(() => {
+    if (billingInterval) {
+      clearInterval(billingInterval);
+    }
+    if (webrtcManager) {
+      webrtcManager.cleanup();
+    }
+  });
+  
+  async function loadSession() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/readings/sessions/${sessionId}`);
+    if (res.ok) {
+      session = await res.json();
+    } else {
+      goto('/dashboard');
+    }
+  }
+  
+  async function startCall() {
+    showPreCallCheck = false;
+    connectionState = 'connecting';
+    
+    await webrtcManager.startCall();
+    
+    // Start session on backend
+    await fetch(`${import.meta.env.PUBLIC_API_URL}/api/readings/sessions/${sessionId}/start`, {
+      method: 'POST'
+    });
+    
+    // Start billing timer for clients
+    if ($userStore.role === 'client') {
+      startBillingTimer();
+    }
+  }
+  
+  function startBillingTimer() {
+    // Send billing tick every minute
+    billingInterval = setInterval(() => {
+      $webSocketStore.send(JSON.stringify({
+        type: 'billing_tick',
+        session_id: sessionId
+      }));
+    }, 60000);
+  }
+  
+  async function endCall(reason = 'user_ended') {
+    connectionState = 'ending';
+    
+    if (billingInterval) {
+      clearInterval(billingInterval);
+    }
+    
+    // End session on backend
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/readings/sessions/${sessionId}/end`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ reason })
+    });
+    
+    if (res.ok) {
+      const data = await res.json();
+      sessionSummary = data;
+      showSummary = true;
+    }
+    
+    if (webrtcManager) {
+      webrtcManager.endCall();
+    }
+  }
+  
+  function toggleMute() {
+    if (localStream) {
+      const audioTrack = localStream.getAudioTracks()[0];
+      if (audioTrack) {
+        audioTrack.enabled = !audioTrack.enabled;
+        isMuted = !audioTrack.enabled;
+      }
+    }
+  }
+  
+  function toggleVideo() {
+    if (localStream) {
+      const videoTrack = localStream.getVideoTracks()[0];
+      if (videoTrack) {
+        videoTrack.enabled = !videoTrack.enabled;
+        isVideoOff = !videoTrack.enabled;
+      }
+    }
+  }
+  
+  function toggleChat() {
+    showChat = !showChat;
+  }
+  
+  function handleConnectionState(state) {
+    connectionState = state;
+    
+    if (state === 'failed' || state === 'disconnected') {
+      handleReconnect();
+    }
+  }
+  
+  async function handleReconnect() {
+    if (reconnectAttempts < 3) {
+      reconnectAttempts++;
+      connectionState = 'reconnecting';
+      
+      setTimeout(async () => {
+        await webrtcManager.reconnect();
+      }, 2000 * reconnectAttempts);
+    } else {
+      await endCall('connection_lost');
+    }
+  }
+  
+  function handleError(error) {
+    console.error('WebRTC Error:', error);
+    
+    if (error.type === 'insufficient_funds') {
+      endCall('insufficient_funds');
+    }
+  }
+  
+  function closeSummary() {
+    goto('/dashboard');
+  }
+</script>
+
+{#if showPreCallCheck}
+  <PreCallCheck 
+    {session}
+    on:ready={startCall}
+    on:cancel={() => goto('/dashboard')}
+  />
+{:else if showSummary}
+  <SessionSummary 
+    {sessionSummary}
+    on:close={closeSummary}
+  />
+{:else}
+  <div class="h-screen flex flex-col bg-black">
+    <!-- Video Area -->
+    <div class="flex-1 relative overflow-hidden">
+      <!-- Remote Video (Main) -->
+      <video 
+        autoplay 
+        playsinline
+        class="w-full h-full object-cover"
+        bind:srcObject={remoteStream}
+      />
+      
+      <!-- Local Video (PiP) -->
+      <div class="absolute bottom-4 right-4 w-48 h-36 bg-gray-900 rounded-lg overflow-hidden shadow-2xl border-2 border-pink-500">
+        {#if isVideoOff}
+          <div class="w-full h-full flex items-center justify-center bg-gray-800">
+            <svg class="w-12 h-12 text-gray-600" fill="currentColor" viewBox="0 0 20 20">
+              <path fill-rule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clip-rule="evenodd"/>
+            </svg>
+          </div>
+        {:else}
+          <video 
+            autoplay 
+            playsinline 
+            muted
+            class="w-full h-full object-cover mirror"
+            bind:srcObject={localStream}
+          />
+        {/if}
+      </div>
+      
+      <!-- Session Info Overlay -->
+      <div class="absolute top-4 left-4 bg-black/70 backdrop-blur-md rounded-lg p-4">
+        <div class="flex items-center space-x-4">
+          <div>
+            <div class="text-pink-400 alex-brush text-2xl">
+              {session.session_type === 'video' ? '📹' : session.session_type === 'phone' ? '📞' : '💬'}
+              {session.reader_name || 'Reader'}
+            </div>
+            <SessionTimer 
+              startTime={session.start_time}
+              rate={session.rate_per_minute}
+              balance={$balanceStore}
+            />
+          </div>
+        </div>
+      </div>
+      
+      <!-- Connection Status -->
+      {#if connectionState !== 'connected'}
+        <div class="absolute top-4 right-4 bg-yellow-600/90 text-white px-3 py-1 rounded-lg">
+          {#if connectionState === 'connecting'}
+            Connecting...
+          {:else if connectionState === 'reconnecting'}
+            Reconnecting... ({reconnectAttempts}/3)
+          {:else if connectionState === 'failed'}
+            Connection Failed
+          {/if}
+        </div>
+      {/if}
+      
+      <!-- Call Controls -->
+      <CallControls 
+        {isMuted}
+        {isVideoOff}
+        {showChat}
+        on:toggleMute={toggleMute}
+        on:toggleVideo={toggleVideo}
+        on:toggleChat={toggleChat}
+        on:endCall={() => endCall('user_ended')}
+      />
+    </div>
+    
+    <!-- Chat Panel -->
+    {#if showChat}
+      <ChatPanel 
+        sessionId={session.id}
+        roomId={session.room_id}
+      />
+    {/if}
+  </div>
+{/if}
+
+<style>
+  .mirror {
+    transform: scaleX(-1);
+  }
+</style>
+
+---
+// frontend/src/routes/dashboard/+page.svelte (COMPLETE DASHBOARDS)
+<script>
+  import { onMount } from 'svelte';
+  import { userStore } from '$lib/stores';
+  import ClientDashboard from '$lib/components/dashboard/ClientDashboard.svelte';
+  import ReaderDashboard from '$lib/components/dashboard/ReaderDashboard.svelte';
+  import AdminDashboard from '$lib/components/dashboard/AdminDashboard.svelte';
+  
+  let userRole = null;
+  let loading = true;
+  
+  onMount(() => {
+    userRole = $userStore?.role;
+    loading = false;
+  });
+</script>
+
+<div class="min-h-screen py-8">
+  {#if loading}
+    <div class="max-w-7xl mx-auto px-4">
+      <div class="animate-pulse">
+        <div class="h-12 bg-gray-700 rounded w-1/4 mb-8"></div>
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <div class="h-32 bg-gray-700 rounded"></div>
+          <div class="h-32 bg-gray-700 rounded"></div>
+          <div class="h-32 bg-gray-700 rounded"></div>
+        </div>
+      </div>
+    </div>
+  {:else if userRole === 'client'}
+    <ClientDashboard />
+  {:else if userRole === 'reader'}
+    <ReaderDashboard />
+  {:else if userRole === 'admin'}
+    <AdminDashboard />
+  {:else}
+    <div class="max-w-7xl mx-auto px-4 text-center py-12">
+      <p class="text-gray-400 text-lg">Please log in to access your dashboard</p>
+      <a href="/login" class="btn-primary mt-4">Login</a>
+    </div>
+  {/if}
+</div>
+
+---
+// frontend/src/lib/components/dashboard/ClientDashboard.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { userStore, balanceStore } from '$lib/stores';
+  import { goto } from '$app/navigation';
+  import BalanceCard from '../cards/BalanceCard.svelte';
+  import SessionHistory from '../SessionHistory.svelte';
+  import FavoriteReaders from '../FavoriteReaders.svelte';
+  import UpcomingReadings from '../UpcomingReadings.svelte';
+  import AutoReloadSettings from '../AutoReloadSettings.svelte';
+  
+  let dashboardData = null;
+  let loading = true;
+  let activeTab = 'overview';
+  
+  onMount(async () => {
+    await loadDashboardData();
+  });
+  
+  async function loadDashboardData() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/dashboard/client/${$userStore.id}`);
+    if (res.ok) {
+      dashboardData = await res.json();
+      balanceStore.set(dashboardData.balance);
+      loading = false;
+    }
+  }
+  
+  async function addFunds() {
+    goto('/dashboard/add-funds');
+  }
+</script>
+
+{#if loading}
+  <div class="max-w-7xl mx-auto px-4">
+    <div class="animate-pulse">
+      <div class="h-12 bg-gray-700 rounded w-1/3 mb-8"></div>
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {#each Array(3) as _}
+          <div class="h-32 bg-gray-700 rounded"></div>
+        {/each}
+      </div>
+    </div>
+  </div>
+{:else}
+  <div class="max-w-7xl mx-auto px-4">
+    <h1 class="alex-brush text-5xl text-pink-500 glow mb-8">Your Dashboard</h1>
+    
+    <!-- Stats Cards -->
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-8">
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <div class="flex justify-between items-start mb-4">
+          <div>
+            <p class="text-gray-400 text-sm">Balance</p>
+            <p class="text-3xl text-white font-bold">${dashboardData.balance.toFixed(2)}</p>
+          </div>
+          <svg class="w-8 h-8 text-yellow-400" fill="currentColor" viewBox="0 0 20 20">
+            <path d="M8.433 7.418c.155-.103.346-.196.567-.267v1.698a2.305 2.305 0 01-.567-.267C8.07 8.34 8 8.114 8 8c0-.114.07-.34.433-.582zM11 12.849v-1.698c.22.071.412.164.567.267.364.243.433.468.433.582 0 .114-.07.34-.433.582a2.305 2.305 0 01-.567.267z"/>
+            <path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm1-13a1 1 0 10-2 0v.092a4.535 4.535 0 00-1.676.662C6.602 6.234 6 7.009 6 8c0 .99.602 1.765 1.324 2.246.48.32 1.054.545 1.676.662v1.941c-.391-.127-.68-.317-.843-.504a1 1 0 10-1.51 1.31c.562.649 1.413 1.076 2.353 1.253V15a1 1 0 102 0v-.092a4.535 4.535 0 001.676-.662C13.398 13.766 14 12.991 14 12c0-.99-.602-1.765-1.324-2.246A4.535 4.535 0 0011 9.092V7.151c.391.127.68.317.843.504a1 1 0 101.511-1.31c-.563-.649-1.413-1.076-2.354-1.253V5z" clip-rule="evenodd"/>
+          </svg>
+        </div>
+        <button on:click={addFunds} class="w-full btn-primary text-sm">
+          Add Funds
+        </button>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <p class="text-gray-400 text-sm mb-2">Total Sessions</p>
+        <p class="text-3xl text-white font-bold">{dashboardData.total_sessions}</p>
+        <p class="text-gray-500 text-xs mt-2">Lifetime</p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <p class="text-gray-400 text-sm mb-2">This Month</p>
+        <p class="text-3xl text-white font-bold">{dashboardData.monthly_minutes} min</p>
+        <p class="text-gray-500 text-xs mt-2">${dashboardData.monthly_spent.toFixed(2)} spent</p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <p class="text-gray-400 text-sm mb-2">Favorite Readers</p>
+        <p class="text-3xl text-white font-bold">{dashboardData.favorite_readers.length}</p>
+        <p class="text-gray-500 text-xs mt-2">
+          {dashboardData.online_favorites} online now
+        </p>
+      </div>
+    </div>
+    
+    <!-- Navigation Tabs -->
+    <div class="flex space-x-1 mb-8 border-b border-pink-500/30">
+      <button 
+        on:click={() => activeTab = 'overview'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition"
+        class:border-b-2={activeTab === 'overview'}
+        class:border-pink-500={activeTab === 'overview'}
+      >
+        Overview
+      </button>
+      <button 
+        on:click={() => activeTab = 'history'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition"
+        class:border-b-2={activeTab === 'history'}
+        class:border-pink-500={activeTab === 'history'}
+      >
+        History
+      </button>
+      <button 
+        on:click={() => activeTab = 'upcoming'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition"
+        class:border-b-2={activeTab === 'upcoming'}
+        class:border-pink-500={activeTab === 'upcoming'}
+      >
+        Upcoming
+      </button>
+      <button 
+        on:click={() => activeTab = 'favorites'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition"
+        class:border-b-2={activeTab === 'favorites'}
+        class:border-pink-500={activeTab === 'favorites'}
+      >
+        Favorites
+      </button>
+      <button 
+        on:click={() => activeTab = 'settings'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition"
+        class:border-b-2={activeTab === 'settings'}
+        class:border-pink-500={activeTab === 'settings'}
+      >
+        Settings
+      </button>
+    </div>
+    
+    <!-- Tab Content -->
+    {#if activeTab === 'overview'}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <div>
+          <h3 class="text-xl text-pink-400 mb-4">Recent Sessions</h3>
+          <SessionHistory sessions={dashboardData.recent_sessions.slice(0, 5)} />
+        </div>
+        <div>
+          <h3 class="text-xl text-pink-400 mb-4">Upcoming Readings</h3>
+          <UpcomingReadings readings={dashboardData.scheduled_readings} />
+        </div>
+      </div>
+    {:else if activeTab === 'history'}
+      <SessionHistory sessions={dashboardData.all_sessions} detailed={true} />
+    {:else if activeTab === 'upcoming'}
+      <UpcomingReadings readings={dashboardData.scheduled_readings} detailed={true} />
+    {:else if activeTab === 'favorites'}
+      <FavoriteReaders readers={dashboardData.favorite_readers} />
+    {:else if activeTab === 'settings'}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <AutoReloadSettings settings={dashboardData.auto_reload} />
+        <div class="bg-black/50 backdrop-blur-md rounded-lg p-6">
+          <h3 class="text-xl text-pink-400 mb-4">Notification Preferences</h3>
+          <!-- Notification settings component -->
+        </div>
+      </div>
+    {/if}
+  </div>
+{/if}
+
+---
+// frontend/src/lib/components/dashboard/ReaderDashboard.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { userStore } from '$lib/stores';
+  import StatusToggle from '../StatusToggle.svelte';
+  import EarningsChart from '../charts/EarningsChart.svelte';
+  import SessionCalendar from '../SessionCalendar.svelte';
+  import ReaderStats from '../ReaderStats.svelte';
+  import RateSettings from '../RateSettings.svelte';
+  import PayoutManager from '../PayoutManager.svelte';
+  import ReviewList from '../ReviewList.svelte';
+  
+  let dashboardData = null;
+  let loading = true;
+  let activeTab = 'overview';
+  let isOnline = false;
+  
+  onMount(async () => {
+    await loadDashboardData();
+  });
+  
+  async function loadDashboardData() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/dashboard/reader/${$userStore.id}`);
+    if (res.ok) {
+      dashboardData = await res.json();
+      isOnline = dashboardData.profile.is_online;
+      loading = false;
+    }
+  }
+  
+  async function updateOnlineStatus(status) {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/readers/status`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ 
+        reader_id: $userStore.id,
+        is_online: status 
+      })
+    });
+    
+    if (res.ok) {
+      isOnline = status;
+      // Send WebSocket update
+      $webSocketStore.send(JSON.stringify({
+        type: 'status_update',
+        status: status ? 'online' : 'offline'
+      }));
+    }
+  }
+  
+  async function requestPayout() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/payments/reader/payout`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reader_id: $userStore.id,
+        amount: dashboardData.pending_payout
+      })
+    });
+    
+    if (res.ok) {
+      await loadDashboardData();
+    }
+  }
+</script>
+
+{#if loading}
+  <div class="max-w-7xl mx-auto px-4">
+    <div class="animate-pulse">
+      <div class="h-12 bg-gray-700 rounded w-1/3 mb-8"></div>
+    </div>
+  </div>
+{:else}
+  <div class="max-w-7xl mx-auto px-4">
+    <div class="flex justify-between items-center mb-8">
+      <h1 class="alex-brush text-5xl text-pink-500 glow">Reader Dashboard</h1>
+      <StatusToggle bind:isOnline on:change={e => updateOnlineStatus(e.detail)} />
+    </div>
+    
+    <!-- Earnings Overview -->
+    <div class="grid grid-cols-1 md:grid-cols-5 gap-6 mb-8">
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <p class="text-gray-400 text-sm mb-2">Today</p>
+        <p class="text-2xl text-green-400 font-bold">${dashboardData.today_earnings.toFixed(2)}</p>
+        <p class="text-gray-500 text-xs mt-2">{dashboardData.today_sessions} sessions</p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <p class="text-gray-400 text-sm mb-2">This Week</p>
+        <p class="text-2xl text-white font-bold">${dashboardData.week_earnings.toFixed(2)}</p>
+        <p class="text-gray-500 text-xs mt-2">{dashboardData.week_minutes} minutes</p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <p class="text-gray-400 text-sm mb-2">This Month</p>
+        <p class="text-2xl text-white font-bold">${dashboardData.month_earnings.toFixed(2)}</p>
+        <p class="text-gray-500 text-xs mt-2">{dashboardData.month_sessions} sessions</p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <p class="text-gray-400 text-sm mb-2">Pending Payout</p>
+        <p class="text-2xl text-yellow-400 font-bold">${dashboardData.pending_payout.toFixed(2)}</p>
+        {#if dashboardData.pending_payout >= 15}
+          <button on:click={requestPayout} class="text-xs text-pink-400 hover:text-pink-300 mt-2">
+            Request Payout →
+          </button>
+        {:else}
+          <p class="text-gray-500 text-xs mt-2">Min $15</p>
+        {/if}
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <p class="text-gray-400 text-sm mb-2">Rating</p>
+        <p class="text-2xl text-white font-bold">
+          ⭐ {dashboardData.profile.rating?.toFixed(1) || 'New'}
+        </p>
+        <p class="text-gray-500 text-xs mt-2">{dashboardData.profile.total_reviews} reviews</p>
+      </div>
+    </div>
+    
+    <!-- Navigation Tabs -->
+    <div class="flex space-x-1 mb-8 border-b border-pink-500/30 overflow-x-auto">
+      <button 
+        on:click={() => activeTab = 'overview'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition whitespace-nowrap"
+        class:border-b-2={activeTab === 'overview'}
+        class:border-pink-500={activeTab === 'overview'}
+      >
+        Overview
+      </button>
+      <button 
+        on:click={() => activeTab = 'earnings'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition whitespace-nowrap"
+        class:border-b-2={activeTab === 'earnings'}
+        class:border-pink-500={activeTab === 'earnings'}
+      >
+        Earnings
+      </button>
+      <button 
+        on:click={() => activeTab = 'calendar'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition whitespace-nowrap"
+        class:border-b-2={activeTab === 'calendar'}
+        class:border-pink-500={activeTab === 'calendar'}
+      >
+        Calendar
+      </button>
+      <button 
+        on:click={() => activeTab = 'reviews'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition whitespace-nowrap"
+        class:border-b-2={activeTab === 'reviews'}
+        class:border-pink-500={activeTab === 'reviews'}
+      >
+        Reviews
+      </button>
+      <button 
+        on:click={() => activeTab = 'rates'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition whitespace-nowrap"
+        class:border-b-2={activeTab === 'rates'}
+        class:border-pink-500={activeTab === 'rates'}
+      >
+        Rates
+      </button>
+      <button 
+        on:click={() => activeTab = 'payouts'}
+        class="px-6 py-3 text-white hover:text-pink-400 transition whitespace-nowrap"
+        class:border-b-2={activeTab === 'payouts'}
+        class:border-pink-500={activeTab === 'payouts'}
+      >
+        Payouts
+      </button>
+    </div>
+    
+    <!-- Tab Content -->
+    {#if activeTab === 'overview'}
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        <ReaderStats stats={dashboardData.stats} />
+        <div>
+          <h3 class="text-xl text-pink-400 mb-4">Recent Sessions</h3>
+          <div class="space-y-3">
+            {#each dashboardData.recent_sessions as session}
+              <div class="bg-black/50 backdrop-blur-md rounded-lg p-4">
+                <div class="flex justify-between items-start">
+                  <div>
+                    <p class="text-white">{session.client_name}</p>
+                    <p class="text-gray-400 text-sm">
+                      {session.duration_minutes} min • ${session.total_charged.toFixed(2)}
+                    </p>
+                  </div>
+                  <p class="text-gray-500 text-sm">
+                    {new Date(session.created_at).toLocaleDateString()}
+                  </p>
+                </div>
+              </div>
+            {/each}
+          </div>
+        </div>
+      </div>
+    {:else if activeTab === 'earnings'}
+      <EarningsChart data={dashboardData.earnings_history} />
+    {:else if activeTab === 'calendar'}
+      <SessionCalendar sessions={dashboardData.scheduled_sessions} />
+    {:else if activeTab === 'reviews'}
+      <ReviewList reviews={dashboardData.reviews} />
+    {:else if activeTab === 'rates'}
+      <RateSettings 
+        rates={dashboardData.profile}
+        on:update={loadDashboardData}
+      />
+    {:else if activeTab === 'payouts'}
+      <PayoutManager payouts={dashboardData.payout_history} />
+    {/if}
+  </div>
+{/if}
+
+
+// ========== ALL SVELTEKIT PAGES - COMPLETE IMPLEMENTATION ==========
+
+// ===== 1. LOGIN PAGE =====
+// frontend/src/routes/login/+page.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
+  import { Clerk } from '@clerk/clerk-js';
+  
+  let email = '';
+  let password = '';
+  let error = '';
+  let loading = false;
+  let clerk;
+  const redirect = $page.url.searchParams.get('redirect') || '/dashboard';
+  
+  onMount(async () => {
+    clerk = new Clerk(import.meta.env.PUBLIC_CLERK_PUBLISHABLE_KEY);
+    await clerk.load();
+    
+    if (clerk.user) {
+      goto(redirect);
+    }
+  });
+  
+  async function handleLogin(e) {
+    e.preventDefault();
+    loading = true;
+    error = '';
+    
+    try {
+      const signIn = await clerk.client.signIn.create({
+        identifier: email,
+        password: password,
+      });
+      
+      if (signIn.status === 'complete') {
+        await clerk.setActive({ session: signIn.createdSessionId });
+        
+        // Register/sync with backend
+        const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/auth/login`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ clerk_token: await clerk.session.getToken() })
+        });
+        
+        if (res.ok) {
+          goto(redirect);
+        }
+      }
+    } catch (err) {
+      error = err.errors?.[0]?.message || 'Login failed. Please try again.';
+    } finally {
+      loading = false;
+    }
+  }
+  
+  async function loginWithGoogle() {
+    try {
+      await clerk.authenticateWithRedirect({
+        strategy: 'oauth_google',
+        redirectUrl: '/sso-callback',
+        redirectUrlComplete: redirect
+      });
+    } catch (err) {
+      error = 'Google login failed. Please try again.';
+    }
+  }
+</script>
+
+<div class="min-h-screen flex items-center justify-center px-4">
+  <div class="max-w-md w-full">
+    <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 border border-pink-500/30">
+      <h1 class="alex-brush text-5xl text-pink-500 glow text-center mb-8">Welcome Back</h1>
+      
+      {#if error}
+        <div class="bg-red-500/20 border border-red-500 rounded-lg p-3 mb-6">
+          <p class="text-red-400 text-sm">{error}</p>
+        </div>
+      {/if}
+      
+      <form on:submit={handleLogin}>
+        <div class="mb-6">
+          <label for="email" class="block text-gray-400 mb-2">Email</label>
+          <input
+            type="email"
+            id="email"
+            bind:value={email}
+            required
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-pink-500"
+            placeholder="your@email.com"
+          />
+        </div>
+        
+        <div class="mb-6">
+          <label for="password" class="block text-gray-400 mb-2">Password</label>
+          <input
+            type="password"
+            id="password"
+            bind:value={password}
+            required
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-pink-500"
+            placeholder="••••••••"
+          />
+        </div>
+        
+        <div class="flex justify-between items-center mb-6">
+          <label class="flex items-center">
+            <input type="checkbox" class="mr-2" />
+            <span class="text-gray-400 text-sm">Remember me</span>
+          </label>
+          <a href="/forgot-password" class="text-pink-400 text-sm hover:text-pink-300">
+            Forgot password?
+          </a>
+        </div>
+        
+        <button
+          type="submit"
+          disabled={loading}
+          class="w-full bg-pink-500 text-white py-3 rounded-lg hover:bg-pink-600 transition disabled:opacity-50"
+        >
+          {loading ? 'Signing in...' : 'Sign In'}
+        </button>
+      </form>
+      
+      <div class="mt-6">
+        <div class="relative">
+          <div class="absolute inset-0 flex items-center">
+            <div class="w-full border-t border-gray-700"></div>
+          </div>
+          <div class="relative flex justify-center text-sm">
+            <span class="px-2 bg-black/50 text-gray-400">Or continue with</span>
+          </div>
+        </div>
+        
+        <button
+          on:click={loginWithGoogle}
+          class="w-full mt-4 bg-white/10 border border-gray-600 text-white py-3 rounded-lg hover:bg-white/20 transition flex items-center justify-center"
+        >
+          <svg class="w-5 h-5 mr-2" viewBox="0 0 24 24">
+            <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
+            <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
+            <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/>
+            <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
+          </svg>
+          Sign in with Google
+        </button>
+      </div>
+      
+      <p class="text-center text-gray-400 mt-6">
+        Don't have an account? 
+        <a href="/signup" class="text-pink-400 hover:text-pink-300">Sign up</a>
+      </p>
+    </div>
+  </div>
+</div>
+
+---
+// ===== 2. SIGNUP PAGE =====
+// frontend/src/routes/signup/+page.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { Clerk } from '@clerk/clerk-js';
+  
+  let email = '';
+  let password = '';
+  let confirmPassword = '';
+  let acceptTerms = false;
+  let error = '';
+  let loading = false;
+  let clerk;
+  
+  onMount(async () => {
+    clerk = new Clerk(import.meta.env.PUBLIC_CLERK_PUBLISHABLE_KEY);
+    await clerk.load();
+    
+    if (clerk.user) {
+      goto('/dashboard');
+    }
+  });
+  
+  async function handleSignup(e) {
+    e.preventDefault();
+    
+    if (password !== confirmPassword) {
+      error = 'Passwords do not match';
+      return;
+    }
+    
+    if (!acceptTerms) {
+      error = 'Please accept the terms and conditions';
+      return;
+    }
+    
+    loading = true;
+    error = '';
+    
+    try {
+      const signUp = await clerk.client.signUp.create({
+        emailAddress: email,
+        password: password,
+      });
+      
+      // Send verification email
+      await signUp.prepareEmailAddressVerification({ 
+        strategy: 'email_code' 
+      });
+      
+      // Redirect to verification page
+      goto(`/verify-email?email=${encodeURIComponent(email)}`);
+      
+    } catch (err) {
+      error = err.errors?.[0]?.message || 'Signup failed. Please try again.';
+    } finally {
+      loading = false;
+    }
+  }
+</script>
+
+<div class="min-h-screen flex items-center justify-center px-4">
+  <div class="max-w-md w-full">
+    <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 border border-pink-500/30">
+      <h1 class="alex-brush text-5xl text-pink-500 glow text-center mb-2">Join SoulSeer</h1>
+      <p class="text-gray-400 text-center mb-8">Connect with gifted psychics</p>
+      
+      {#if error}
+        <div class="bg-red-500/20 border border-red-500 rounded-lg p-3 mb-6">
+          <p class="text-red-400 text-sm">{error}</p>
+        </div>
+      {/if}
+      
+      <form on:submit={handleSignup}>
+        <div class="mb-4">
+          <label for="email" class="block text-gray-400 mb-2">Email</label>
+          <input
+            type="email"
+            id="email"
+            bind:value={email}
+            required
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-pink-500"
+          />
+        </div>
+        
+        <div class="mb-4">
+          <label for="password" class="block text-gray-400 mb-2">Password</label>
+          <input
+            type="password"
+            id="password"
+            bind:value={password}
+            required
+            minlength="8"
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-pink-500"
+          />
+          <p class="text-gray-500 text-xs mt-1">Minimum 8 characters</p>
+        </div>
+        
+        <div class="mb-6">
+          <label for="confirmPassword" class="block text-gray-400 mb-2">Confirm Password</label>
+          <input
+            type="password"
+            id="confirmPassword"
+            bind:value={confirmPassword}
+            required
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-pink-500"
+          />
+        </div>
+        
+        <div class="mb-6">
+          <label class="flex items-start">
+            <input
+              type="checkbox"
+              bind:checked={acceptTerms}
+              class="mt-1 mr-2"
+            />
+            <span class="text-gray-400 text-sm">
+              I agree to the <a href="/terms" class="text-pink-400 hover:text-pink-300">Terms of Service</a> 
+              and <a href="/privacy" class="text-pink-400 hover:text-pink-300">Privacy Policy</a>
+            </span>
+          </label>
+        </div>
+        
+        <button
+          type="submit"
+          disabled={loading}
+          class="w-full bg-pink-500 text-white py-3 rounded-lg hover:bg-pink-600 transition disabled:opacity-50"
+        >
+          {loading ? 'Creating Account...' : 'Create Account'}
+        </button>
+      </form>
+      
+      <p class="text-center text-gray-400 mt-6">
+        Already have an account? 
+        <a href="/login" class="text-pink-400 hover:text-pink-300">Sign in</a>
+      </p>
+      
+      <p class="text-center text-gray-500 text-xs mt-4">
+        Want to become a reader? 
+        <a href="/apply-reader" class="text-pink-400 hover:text-pink-300">Apply here</a>
+      </p>
+    </div>
+  </div>
+</div>
+
+---
+// ===== 3. MESSAGES PAGE =====
+// frontend/src/routes/messages/+page.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { userStore, webSocketStore } from '$lib/stores';
+  
+  let threads = [];
+  let selectedThread = null;
+  let messages = [];
+  let newMessage = '';
+  let loading = true;
+  let sending = false;
+  
+  onMount(async () => {
+    await loadThreads();
+  });
+  
+  async function loadThreads() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/messages/threads/${$userStore.id}`);
+    if (res.ok) {
+      threads = await res.json();
+      loading = false;
+    }
+  }
+  
+  async function selectThread(thread) {
+    selectedThread = thread;
+    await loadMessages(thread.id);
+    
+    // Mark as read
+    if (thread.unread_count > 0) {
+      await fetch(`${import.meta.env.PUBLIC_API_URL}/api/messages/threads/${thread.id}/read`, {
+        method: 'POST'
+      });
+      thread.unread_count = 0;
+    }
+  }
+  
+  async function loadMessages(threadId) {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/messages/thread/${threadId}`);
+    if (res.ok) {
+      messages = await res.json();
+    }
+  }
+  
+  async function sendMessage() {
+    if (!newMessage.trim() || !selectedThread) return;
+    
+    sending = true;
+    
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/messages/send`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        thread_id: selectedThread.id,
+        recipient_id: selectedThread.other_user.id,
+        content: newMessage
+      })
+    });
+    
+    if (res.ok) {
+      const message = await res.json();
+      messages = [...messages, message];
+      newMessage = '';
+      
+      // Send via WebSocket for real-time delivery
+      $webSocketStore.send(JSON.stringify({
+        type: 'message',
+        recipient_id: selectedThread.other_user.id,
+        message: message
+      }));
+    }
+    
+    sending = false;
+  }
+  
+  function formatTime(date) {
+    return new Date(date).toLocaleTimeString('en-US', { 
+      hour: 'numeric', 
+      minute: '2-digit' 
+    });
+  }
+</script>
+
+<div class="min-h-screen max-w-7xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8">Messages</h1>
+  
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-6 h-[600px]">
+    <!-- Thread List -->
+    <div class="bg-black/50 backdrop-blur-md rounded-lg border border-pink-500/30 overflow-hidden">
+      <div class="p-4 border-b border-pink-500/30">
+        <h2 class="text-pink-400">Conversations</h2>
+      </div>
+      
+      <div class="overflow-y-auto h-[520px]">
+        {#if loading}
+          <div class="p-4 text-center text-gray-400">Loading...</div>
+        {:else if threads.length === 0}
+          <div class="p-4 text-center text-gray-400">No messages yet</div>
+        {:else}
+          {#each threads as thread}
+            <button
+              on:click={() => selectThread(thread)}
+              class="w-full p-4 hover:bg-pink-500/10 transition text-left border-b border-gray-800"
+              class:bg-pink-500/20={selectedThread?.id === thread.id}
+            >
+              <div class="flex justify-between items-start">
+                <div class="flex-1">
+                  <p class="text-white font-medium">{thread.other_user.name}</p>
+                  <p class="text-gray-400 text-sm truncate">{thread.last_message}</p>
+                </div>
+                <div class="text-right">
+                  <p class="text-gray-500 text-xs">{formatTime(thread.last_message_at)}</p>
+                  {#if thread.unread_count > 0}
+                    <span class="inline-block bg-pink-500 text-white text-xs rounded-full px-2 py-1 mt-1">
+                      {thread.unread_count}
+                    </span>
+                  {/if}
+                </div>
+              </div>
+            </button>
+          {/each}
+        {/if}
+      </div>
+    </div>
+    
+    <!-- Message View -->
+    <div class="md:col-span-2 bg-black/50 backdrop-blur-md rounded-lg border border-pink-500/30 overflow-hidden">
+      {#if selectedThread}
+        <!-- Header -->
+        <div class="p-4 border-b border-pink-500/30">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-white font-medium">{selectedThread.other_user.name}</h3>
+              <p class="text-gray-400 text-sm">
+                {selectedThread.other_user.role === 'reader' ? 'Psychic Reader' : 'Client'}
+              </p>
+            </div>
+            {#if selectedThread.other_user.role === 'reader'}
+              <a 
+                href="/readings?reader={selectedThread.other_user.id}"
+                class="btn-primary text-sm"
+              >
+                Book Reading
+              </a>
+            {/if}
+          </div>
+        </div>
+        
+        <!-- Messages -->
+        <div class="h-[430px] overflow-y-auto p-4 space-y-4">
+          {#each messages as message}
+            <div 
+              class="flex"
+              class:justify-end={message.sender_id === $userStore.id}
+            >
+              <div 
+                class="max-w-[70%] rounded-lg p-3"
+                class:bg-pink-500={message.sender_id === $userStore.id}
+                class:bg-gray-700={message.sender_id !== $userStore.id}
+              >
+                <p class="text-white">{message.content}</p>
+                <p class="text-xs mt-1"
+                   class:text-pink-200={message.sender_id === $userStore.id}
+                   class:text-gray-400={message.sender_id !== $userStore.id}
+                >
+                  {formatTime(message.created_at)}
+                </p>
+              </div>
+            </div>
+          {/each}
+        </div>
+        
+        <!-- Input -->
+        <div class="p-4 border-t border-pink-500/30">
+          <form on:submit|preventDefault={sendMessage} class="flex gap-2">
+            <input
+              type="text"
+              bind:value={newMessage}
+              placeholder="Type a message..."
+              class="flex-1 bg-black/50 border border-pink-500/30 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-pink-500"
+            />
+            <button
+              type="submit"
+              disabled={sending || !newMessage.trim()}
+              class="bg-pink-500 text-white px-6 py-2 rounded-lg hover:bg-pink-600 transition disabled:opacity-50"
+            >
+              Send
+            </button>
+          </form>
+        </div>
+      {:else}
+        <div class="h-full flex items-center justify-center text-gray-400">
+          Select a conversation to view messages
+        </div>
+      {/if}
+    </div>
+  </div>
+</div>
+
+---
+// ===== 4. HELP CENTER PAGE =====
+// frontend/src/routes/help/+page.svelte
+<script>
+  import { onMount } from 'svelte';
+  
+  let searchQuery = '';
+  let categories = [];
+  let articles = [];
+  let selectedCategory = 'all';
+  let selectedArticle = null;
+  let loading = true;
+  
+  onMount(async () => {
+    await Promise.all([loadCategories(), loadArticles()]);
+    loading = false;
+  });
+  
+  async function loadCategories() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/help/categories`);
+    if (res.ok) {
+      categories = await res.json();
+    }
+  }
+  
+  async function loadArticles(category = 'all') {
+    const url = category === 'all' 
+      ? `${import.meta.env.PUBLIC_API_URL}/api/help/articles`
+      : `${import.meta.env.PUBLIC_API_URL}/api/help/articles?category=${category}`;
+    
+    const res = await fetch(url);
+    if (res.ok) {
+      articles = await res.json();
+    }
+  }
+  
+  async function search() {
+    if (!searchQuery.trim()) {
+      await loadArticles(selectedCategory);
+      return;
+    }
+    
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/help/search?q=${encodeURIComponent(searchQuery)}`);
+    if (res.ok) {
+      articles = await res.json();
+    }
+  }
+  
+  function selectCategory(category) {
+    selectedCategory = category;
+    loadArticles(category);
+    selectedArticle = null;
+  }
+  
+  async function markHelpful(articleId, helpful) {
+    await fetch(`${import.meta.env.PUBLIC_API_URL}/api/help/articles/${articleId}/feedback`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ helpful })
+    });
+  }
+</script>
+
+<div class="min-h-screen max-w-7xl mx-auto px-4 py-8">
+  <div class="text-center mb-12">
+    <h1 class="alex-brush text-5xl text-pink-500 glow mb-4">Help Center</h1>
+    <p class="text-gray-400 text-lg">How can we help you today?</p>
+  </div>
+  
+  <!-- Search Bar -->
+  <div class="max-w-2xl mx-auto mb-12">
+    <form on:submit|preventDefault={search} class="relative">
+      <input
+        type="text"
+        bind:value={searchQuery}
+        placeholder="Search for answers..."
+        class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-6 py-4 pr-12 text-white focus:outline-none focus:border-pink-500"
+      />
+      <button type="submit" class="absolute right-4 top-1/2 transform -translate-y-1/2">
+        <svg class="w-6 h-6 text-pink-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+        </svg>
+      </button>
+    </form>
+  </div>
+  
+  <!-- Quick Links -->
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-6 mb-12">
+    <a href="/help/getting-started" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <div class="text-3xl mb-3">🚀</div>
+      <h3 class="text-pink-400 mb-2">Getting Started</h3>
+      <p class="text-gray-400 text-sm">New to SoulSeer? Start here</p>
+    </a>
+    
+    <a href="/help/payments" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <div class="text-3xl mb-3">💳</div>
+      <h3 class="text-pink-400 mb-2">Payments & Billing</h3>
+      <p class="text-gray-400 text-sm">Balance, payouts, refunds</p>
+    </a>
+    
+    <a href="/help/readings" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <div class="text-3xl mb-3">🔮</div>
+      <h3 class="text-pink-400 mb-2">Readings</h3>
+      <p class="text-gray-400 text-sm">How readings work</p>
+    </a>
+    
+    <a href="/contact" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <div class="text-3xl mb-3">💬</div>
+      <h3 class="text-pink-400 mb-2">Contact Support</h3>
+      <p class="text-gray-400 text-sm">Can't find an answer?</p>
+    </a>
+  </div>
+  
+  <div class="grid grid-cols-1 md:grid-cols-4 gap-6">
+    <!-- Categories -->
+    <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+      <h3 class="text-pink-400 mb-4">Categories</h3>
+      <ul class="space-y-2">
+        <li>
+          <button
+            on:click={() => selectCategory('all')}
+            class="text-gray-400 hover:text-pink-400 transition"
+            class:text-pink-400={selectedCategory === 'all'}
+          >
+            All Articles
+          </button>
+        </li>
+        {#each categories as category}
+          <li>
+            <button
+              on:click={() => selectCategory(category.slug)}
+              class="text-gray-400 hover:text-pink-400 transition"
+              class:text-pink-400={selectedCategory === category.slug}
+            >
+              {category.name}
+            </button>
+          </li>
+        {/each}
+      </ul>
+    </div>
+    
+    <!-- Articles -->
+    <div class="md:col-span-3">
+      {#if selectedArticle}
+        <!-- Article View -->
+        <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+          <button
+            on:click={() => selectedArticle = null}
+            class="text-pink-400 hover:text-pink-300 mb-4"
+          >
+            ← Back to articles
+          </button>
+          
+          <h2 class="text-2xl text-white mb-4">{selectedArticle.title}</h2>
+          
+          <div class="prose prose-invert max-w-none">
+            {@html selectedArticle.content}
+          </div>
+          
+          <div class="mt-8 pt-8 border-t border-pink-500/30">
+            <p class="text-gray-400 mb-4">Was this article helpful?</p>
+            <div class="flex gap-4">
+              <button
+                on:click={() => markHelpful(selectedArticle.id, true)}
+                class="bg-green-500/20 border border-green-500 text-green-400 px-6 py-2 rounded-lg hover:bg-green-500/30 transition"
+              >
+                Yes
+              </button>
+              <button
+                on:click={() => markHelpful(selectedArticle.id, false)}
+                class="bg-red-500/20 border border-red-500 text-red-400 px-6 py-2 rounded-lg hover:bg-red-500/30 transition"
+              >
+                No
+              </button>
+            </div>
+          </div>
+        </div>
+      {:else}
+        <!-- Article List -->
+        <div class="space-y-4">
+          {#if loading}
+            <div class="text-center text-gray-400">Loading articles...</div>
+          {:else if articles.length === 0}
+            <div class="text-center text-gray-400">No articles found</div>
+          {:else}
+            {#each articles as article}
+              <button
+                on:click={() => selectedArticle = article}
+                class="w-full bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition text-left"
+              >
+                <h3 class="text-lg text-pink-400 mb-2">{article.title}</h3>
+                <p class="text-gray-400 text-sm">{article.excerpt}</p>
+              </button>
+            {/each}
+          {/if}
+        </div>
+      {/if}
+    </div>
+  </div>
+</div>
+
+---
+// ===== 5. FAQ PAGE =====
+// frontend/src/routes/faq/+page.svelte
+<script>
+  let faqs = [
+    {
+      category: 'Getting Started',
+      questions: [
+        {
+          q: 'How do I book a reading?',
+          a: 'You can book a reading by browsing our available readers, selecting one that resonates with you, and clicking "Connect" for an instant reading or "Schedule" for a future appointment.'
+        },
+        {
+          q: 'What types of readings are available?',
+          a: 'We offer chat, phone, and video readings. Each reader sets their own rates for different session types.'
+        }
+      ]
+    },
+    {
+      category: 'Payments',
+      questions: [
+        {
+          q: 'How does pay-per-minute billing work?',
+          a: 'You add funds to your account balance. During a reading, you\'re charged per minute at the reader\'s rate. The session automatically ends if your balance runs out.'
+        },
+        {
+          q: 'What percentage do readers keep?',
+          a: 'Readers keep 70% of their earnings, which is significantly higher than most platforms. We believe in fair compensation for our gifted psychics.'
+        },
+        {
+          q: 'When do readers get paid?',
+          a: 'Readers receive automatic daily payouts when their balance exceeds $15. Payments are processed via Stripe directly to their bank account.'
+        }
+      ]
+    },
+    {
+      category: 'Readings',
+      questions: [
+        {
+          q: 'Can I schedule readings in advance?',
+          a: 'Yes! You can book flat-rate scheduled readings with your favorite readers for specific time slots.'
+        },
+        {
+          q: 'What if I lose connection during a reading?',
+          a: 'Our system automatically pauses billing if you disconnect. You have 2 minutes to reconnect before the session ends.'
+        },
+        {
+          q: 'Can I get a refund?',
+          a: 'Refunds are considered on a case-by-case basis. If you experience technical issues or are unsatisfied, contact support within 24 hours.'
+        }
+      ]
+    },
+    {
+      category: 'Becoming a Reader',
+      questions: [
+        {
+          q: 'How do I become a reader on SoulSeer?',
+          a: 'Apply through our "Become a Reader" page. We review all applications carefully and look for genuine psychic abilities and a compassionate approach.'
+        },
+        {
+          q: 'What are the requirements?',
+          a: 'We require at least 2 years of professional reading experience, references, and a sample reading. You must also pass our verification process.'
+        },
+        {
+          q: 'Can I set my own rates?',
+          a: 'Yes! Readers have complete control over their per-minute rates for chat, phone, and video sessions.'
+        }
+      ]
+    }
+  ];
+  
+  let openItems = {};
+  
+  function toggleItem(category, index) {
+    const key = `${category}-${index}`;
+    openItems[key] = !openItems[key];
+  }
+</script>
+
+<div class="min-h-screen max-w-4xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8 text-center">
+    Frequently Asked Questions
+  </h1>
+  
+  <div class="space-y-8">
+    {#each faqs as category}
+      <div>
+        <h2 class="text-2xl text-pink-400 mb-4">{category.category}</h2>
+        <div class="space-y-4">
+          {#each category.questions as question, index}
+            <div class="bg-black/50 backdrop-blur-md rounded-lg border border-pink-500/30">
+              <button
+                on:click={() => toggleItem(category.category, index)}
+                class="w-full p-4 text-left flex justify-between items-center hover:bg-pink-500/10 transition"
+              >
+                <span class="text-white">{question.q}</span>
+                <svg 
+                  class="w-5 h-5 text-pink-400 transition-transform"
+                  class:rotate-180={openItems[`${category.category}-${index}`]}
+                  fill="none" 
+                  stroke="currentColor" 
+                  viewBox="0 0 24 24"
+                >
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+                </svg>
+              </button>
+              {#if openItems[`${category.category}-${index}`]}
+                <div class="px-4 pb-4 text-gray-300">
+                  {question.a}
+                </div>
+              {/if}
+            </div>
+          {/each}
+        </div>
+      </div>
+    {/each}
+  </div>
+  
+  <div class="mt-12 text-center bg-black/50 backdrop-blur-md rounded-lg p-8 border border-pink-500/30">
+    <h3 class="text-xl text-pink-400 mb-4">Still have questions?</h3>
+    <p class="text-gray-400 mb-6">Our support team is here to help</p>
+    <a href="/contact" class="btn-primary">Contact Support</a>
+  </div>
+</div>
+
+---
+// ===== 6. CONTACT PAGE =====
+// frontend/src/routes/contact/+page.svelte
+<script>
+  let formData = {
+    name: '',
+    email: '',
+    subject: '',
+    category: 'general',
+    message: ''
+  };
+  
+  let sending = false;
+  let sent = false;
+  let error = '';
+  
+  async function handleSubmit(e) {
+    e.preventDefault();
+    sending = true;
+    error = '';
+    
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/contact`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(formData)
+    });
+    
+    if (res.ok) {
+      sent = true;
+      formData = {
+        name: '',
+        email: '',
+        subject: '',
+        category: 'general',
+        message: ''
+      };
+    } else {
+      error = 'Failed to send message. Please try again.';
+    }
+    
+    sending = false;
+  }
+</script>
+
+<div class="min-h-screen max-w-4xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8 text-center">Contact Us</h1>
+  
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+    <!-- Contact Form -->
+    <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+      <h2 class="text-2xl text-pink-400 mb-6">Send us a message</h2>
+      
+      {#if sent}
+        <div class="bg-green-500/20 border border-green-500 rounded-lg p-4 mb-6">
+          <p class="text-green-400">Thank you for your message! We'll get back to you within 24 hours.</p>
+        </div>
+      {/if}
+      
+      {#if error}
+        <div class="bg-red-500/20 border border-red-500 rounded-lg p-4 mb-6">
+          <p class="text-red-400">{error}</p>
+        </div>
+      {/if}
+      
+      <form on:submit={handleSubmit}>
+        <div class="mb-4">
+          <label for="name" class="block text-gray-400 mb-2">Name</label>
+          <input
+            type="text"
+            id="name"
+            bind:value={formData.name}
+            required
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-pink-500"
+          />
+        </div>
+        
+        <div class="mb-4">
+          <label for="email" class="block text-gray-400 mb-2">Email</label>
+          <input
+            type="email"
+            id="email"
+            bind:value={formData.email}
+            required
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-pink-500"
+          />
+        </div>
+        
+        <div class="mb-4">
+          <label for="category" class="block text-gray-400 mb-2">Category</label>
+          <select
+            id="category"
+            bind:value={formData.category}
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-pink-500"
+          >
+            <option value="general">General Inquiry</option>
+            <option value="support">Technical Support</option>
+            <option value="billing">Billing Question</option>
+            <option value="report">Report an Issue</option>
+            <option value="feedback">Feedback</option>
+          </select>
+        </div>
+        
+        <div class="mb-4">
+          <label for="subject" class="block text-gray-400 mb-2">Subject</label>
+          <input
+            type="text"
+            id="subject"
+            bind:value={formData.subject}
+            required
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-pink-500"
+          />
+        </div>
+        
+        <div class="mb-6">
+          <label for="message" class="block text-gray-400 mb-2">Message</label>
+          <textarea
+            id="message"
+            bind:value={formData.message}
+            required
+            rows="6"
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-2 text-white focus:outline-none focus:border-pink-500"
+          ></textarea>
+        </div>
+        
+        <button
+          type="submit"
+          disabled={sending}
+          class="w-full bg-pink-500 text-white py-3 rounded-lg hover:bg-pink-600 transition disabled:opacity-50"
+        >
+          {sending ? 'Sending...' : 'Send Message'}
+        </button>
+      </form>
+    </div>
+    
+    <!-- Contact Info -->
+    <div>
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 mb-6">
+        <h3 class="text-xl text-pink-400 mb-4">Get in Touch</h3>
+        
+        <div class="space-y-4">
+          <div class="flex items-start">
+            <svg class="w-6 h-6 text-pink-400 mr-3 mt-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+            </svg>
+            <div>
+              <p class="text-gray-400">Email</p>
+              <p class="text-white">support@soulseer.com</p>
+            </div>
+          </div>
+          
+          <div class="flex items-start">
+            <svg class="w-6 h-6 text-pink-400 mr-3 mt-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <div>
+              <p class="text-gray-400">Response Time</p>
+              <p class="text-white">Within 24 hours</p>
+            </div>
+          </div>
+          
+          <div class="flex items-start">
+            <svg class="w-6 h-6 text-pink-400 mr-3 mt-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9"/>
+            </svg>
+            <div>
+              <p class="text-gray-400">Available</p>
+              <p class="text-white">24/7 Support</p>
+            </div>
+          </div>
+        </div>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <h3 class="text-xl text-pink-400 mb-4">Quick Links</h3>
+        
+        <ul class="space-y-2">
+          <li>
+            <a href="/help" class="text-gray-400 hover:text-pink-400 transition">
+              Help Center →
+            </a>
+          </li>
+          <li>
+            <a href="/faq" class="text-gray-400 hover:text-pink-400 transition">
+              FAQ →
+            </a>
+          </li>
+          <li>
+            <a href="/policies" class="text-gray-400 hover:text-pink-400 transition">
+              Policies →
+            </a>
+          </li>
+          <li>
+            <a href="/apply-reader" class="text-gray-400 hover:text-pink-400 transition">
+              Become a Reader →
+            </a>
+          </li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</div>
+
+---
+// ===== 7. ABOUT PAGE (COMPLETE) =====
+// frontend/src/routes/about/+page.svelte
+<script>
+  import { fade, fly } from 'svelte/transition';
+</script>
+
+<div class="min-h-screen" in:fade>
+  <!-- Hero Section -->
+  <div class="relative py-20 px-4 text-center">
+    <h1 class="alex-brush text-6xl md:text-7xl text-pink-500 glow mb-4">About SoulSeer</h1>
+    <p class="text-xl text-gray-300 max-w-3xl mx-auto">
+      Where genuine spiritual guidance meets ethical practice
+    </p>
+  </div>
+  
+  <!-- Mission Section -->
+  <section class="max-w-6xl mx-auto px-4 mb-16">
+    <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 border border-pink-500/30">
+      <h2 class="alex-brush text-4xl text-pink-400 mb-6 text-center">Our Mission</h2>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div>
+          <p class="text-lg text-gray-300 leading-relaxed mb-4">
+            At SoulSeer, we are dedicated to providing ethical, compassionate, and judgment-free 
+            spiritual guidance. Our mission is twofold: to offer clients genuine, heart-centered 
+            readings and to uphold fair, ethical standards for our readers.
+          </p>
+          <p class="text-lg text-gray-300 leading-relaxed">
+            Unlike other platforms that prioritize profit over people, we ensure our readers keep 
+            70% of their earnings and have a voice in shaping our community.
+          </p>
+        </div>
+        <div>
+          <p class="text-lg text-gray-300 leading-relaxed mb-4">
+            Founded by psychic medium Emilynn, SoulSeer was created as a response to the corporate 
+            greed that dominates many psychic platforms. We believe in transparency, fairness, and 
+            authentic spiritual connection.
+          </p>
+          <p class="text-lg text-gray-300 leading-relaxed">
+            SoulSeer is more than just an app—it's a soul tribe. A community of gifted psychics 
+            united by our life's calling: to guide, heal, and empower those who seek clarity on 
+            their journey.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+  
+  <!-- Founder Section -->
+  <section class="max-w-6xl mx-auto px-4 mb-16">
+    <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 border border-pink-500/30">
+      <h2 class="alex-brush text-4xl text-pink-400 mb-8 text-center">Meet Our Founder</h2>
+      <div class="flex flex-col md:flex-row items-center gap-8">
+        <img 
+          src="https://i.postimg.cc/s2ds9RtC/FOUNDER.jpg" 
+          alt="Emilynn - Founder" 
+          class="w-64 h-64 rounded-full border-4 border-pink-500 shadow-2xl"
+        />
+        <div class="flex-1">
+          <h3 class="text-3xl text-pink-400 mb-4">Emilynn</h3>
+          <p class="text-gray-300 leading-relaxed mb-4">
+            With over 15 years of experience as a psychic medium, Emilynn has dedicated her life 
+            to helping others find clarity and peace through spiritual guidance. Her own journey 
+            through the psychic industry revealed the need for a platform that truly values both 
+            readers and clients.
+          </p>
+          <p class="text-gray-300 leading-relaxed mb-4">
+            "I created SoulSeer because I believe psychic readers deserve fair compensation and 
+            respect for their gifts. Every reader on our platform is here because they have a 
+            genuine calling to help others, not because they're trying to meet corporate quotas."
+          </p>
+          <p class="text-pink-400 italic">
+            - Emilynn, Founder & CEO
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+  
+  <!-- Values Section -->
+  <section class="max-w-6xl mx-auto px-4 mb-16">
+    <h2 class="alex-brush text-4xl text-pink-400 mb-8 text-center">Our Values</h2>
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center border border-pink-500/30 hover:border-pink-500 transition">
+        <div class="text-5xl mb-4">✨</div>
+        <h3 class="text-xl text-pink-400 mb-3">Authenticity</h3>
+        <p class="text-gray-400">
+          Every reader is carefully vetted to ensure genuine psychic abilities and a 
+          compassionate approach to guidance.
+        </p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center border border-pink-500/30 hover:border-pink-500 transition">
+        <div class="text-5xl mb-4">🤝</div>
+        <h3 class="text-xl text-pink-400 mb-3">Fairness</h3>
+        <p class="text-gray-400">
+          70% of earnings go directly to readers, with daily payouts. We believe in 
+          rewarding the gifts our readers share.
+        </p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center border border-pink-500/30 hover:border-pink-500 transition">
+        <div class="text-5xl mb-4">💫</div>
+        <h3 class="text-xl text-pink-400 mb-3">Community</h3>
+        <p class="text-gray-400">
+          We're building a soul tribe where readers and clients support each other on 
+          their spiritual journeys.
+        </p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center border border-pink-500/30 hover:border-pink-500 transition">
+        <div class="text-5xl mb-4">🛡️</div>
+        <h3 class="text-xl text-pink-400 mb-3">Privacy</h3>
+        <p class="text-gray-400">
+          End-to-end encryption and strict privacy policies ensure your spiritual journey 
+          remains confidential.
+        </p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center border border-pink-500/30 hover:border-pink-500 transition">
+        <div class="text-5xl mb-4">🌟</div>
+        <h3 class="text-xl text-pink-400 mb-3">Excellence</h3>
+        <p class="text-gray-400">
+          We maintain high standards for reader quality and platform functionality to 
+          ensure the best experience.
+        </p>
+      </div>
+      
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 text-center border border-pink-500/30 hover:border-pink-500 transition">
+        <div class="text-5xl mb-4">❤️</div>
+        <h3 class="text-xl text-pink-400 mb-3">Compassion</h3>
+        <p class="text-gray-400">
+          Every interaction on our platform is guided by empathy, understanding, and 
+          genuine care for wellbeing.
+        </p>
+      </div>
+    </div>
+  </section>
+  
+  <!-- Stats Section -->
+  <section class="max-w-6xl mx-auto px-4 mb-16">
+    <div class="bg-gradient-to-r from-pink-500/20 to-purple-500/20 rounded-lg p-8 border border-pink-500/30">
+      <div class="grid grid-cols-2 md:grid-cols-4 gap-8 text-center">
+        <div>
+          <p class="text-4xl font-bold text-pink-400">70%</p>
+          <p class="text-gray-400">Reader Earnings</p>
+        </div>
+        <div>
+          <p class="text-4xl font-bold text-pink-400">100+</p>
+          <p class="text-gray-400">Verified Readers</p>
+        </div>
+        <div>
+          <p class="text-4xl font-bold text-pink-400">24/7</p>
+          <p class="text-gray-400">Available Support</p>
+        </div>
+        <div>
+          <p class="text-4xl font-bold text-pink-400">$15</p>
+          <p class="text-gray-400">Daily Payouts</p>
+        </div>
+      </div>
+    </div>
+  </section>
+  
+  <!-- CTA Section -->
+  <section class="text-center py-16 px-4">
+    <h2 class="alex-brush text-4xl text-pink-400 mb-6">Join Our Soul Tribe</h2>
+    <p class="text-xl text-gray-300 mb-8 max-w-2xl mx-auto">
+      Whether you're seeking guidance or have gifts to share, you belong here
+    </p>
+    <div class="flex flex-col sm:flex-row gap-4 justify-center">
+      <a href="/signup" class="btn-primary">Get Your First Reading</a>
+      <a href="/apply-reader" class="btn-secondary">Become a Reader</a>
+    </div>
+  </section>
+</div>
+
+---
+// ===== 8. ALL POLICY PAGES =====
+// frontend/src/routes/terms/+page.svelte
+<script>
+  // Terms of Service Page
+</script>
+
+<div class="min-h-screen max-w-4xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8 text-center">Terms of Service</h1>
+  
+  <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 border border-pink-500/30">
+    <p class="text-gray-400 mb-6">Effective Date: January 1, 2025</p>
+    
+    <div class="space-y-6 text-gray-300">
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">1. Acceptance of Terms</h2>
+        <p>By using SoulSeer, you agree to these Terms of Service. If you do not agree, please do not use our services.</p>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">2. Service Description</h2>
+        <p>SoulSeer provides a platform connecting clients with psychic readers for spiritual guidance. Services include:</p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>Pay-per-minute readings (chat, phone, video)</li>
+          <li>Scheduled flat-rate readings</li>
+          <li>Live streaming with virtual gifting</li>
+          <li>Marketplace for spiritual products and services</li>
+          <li>Community forums</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">3. User Accounts</h2>
+        <p>You must be 18 years or older to use SoulSeer. You are responsible for:</p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>Maintaining the confidentiality of your account</li>
+          <li>All activities that occur under your account</li>
+          <li>Providing accurate and current information</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">4. Payments and Billing</h2>
+        <p><strong>For Clients:</strong></p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>You prepay for services by adding funds to your account</li>
+          <li>Pay-per-minute sessions charge per minute at the reader's rate</li>
+          <li>Sessions end automatically when balance is insufficient</li>
+          <li>Refunds are considered case-by-case</li>
+        </ul>
+        
+        <p class="mt-3"><strong>For Readers:</strong></p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>Readers receive 70% of earnings</li>
+          <li>Daily automatic payouts for balances over $15</li>
+          <li>Readers must maintain accurate tax information</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">5. Prohibited Conduct</h2>
+        <p>Users may not:</p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>Harass, threaten, or abuse other users</li>
+          <li>Share explicit or inappropriate content</li>
+          <li>Attempt to circumvent the platform for payments</li>
+          <li>Impersonate others or provide false information</li>
+          <li>Use the service for illegal activities</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">6. Content Guidelines</h2>
+        <p>All content must be respectful and appropriate. We reserve the right to remove content that violates our guidelines.</p>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">7. Disclaimer</h2>
+        <p>Psychic readings are for entertainment and spiritual guidance only. They should not replace professional medical, legal, or financial advice.</p>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">8. Limitation of Liability</h2>
+        <p>SoulSeer is not liable for any indirect, incidental, or consequential damages arising from use of our services.</p>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">9. Changes to Terms</h2>
+        <p>We may update these terms at any time. Continued use after changes constitutes acceptance.</p>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">10. Contact</h2>
+        <p>For questions about these terms, contact us at legal@soulseer.com</p>
+      </section>
+    </div>
+  </div>
+</div>
+
+---
+// frontend/src/routes/privacy/+page.svelte
+<script>
+  // Privacy Policy Page
+</script>
+
+<div class="min-h-screen max-w-4xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8 text-center">Privacy Policy</h1>
+  
+  <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 border border-pink-500/30">
+    <p class="text-gray-400 mb-6">Last Updated: January 1, 2025</p>
+    
+    <div class="space-y-6 text-gray-300">
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">1. Information We Collect</h2>
+        <p>We collect information you provide directly:</p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>Account information (email, name)</li>
+          <li>Payment information (processed securely via Stripe)</li>
+          <li>Session recordings and chat transcripts</li>
+          <li>Profile information</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">2. How We Use Information</h2>
+        <ul class="list-disc ml-6 space-y-1">
+          <li>To provide and improve our services</li>
+          <li>To process payments</li>
+          <li>To communicate with you</li>
+          <li>To ensure safety and prevent fraud</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">3. Information Sharing</h2>
+        <p>We do not sell your personal information. We share information only:</p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>With your consent</li>
+          <li>To comply with legal obligations</li>
+          <li>With service providers (Stripe, Clerk)</li>
+          <li>To protect rights and safety</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">4. Data Security</h2>
+        <p>We implement industry-standard security measures including:</p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>End-to-end encryption for communications</li>
+          <li>Secure payment processing</li>
+          <li>Regular security audits</li>
+          <li>Access controls</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">5. Your Rights</h2>
+        <p>You have the right to:</p>
+        <ul class="list-disc ml-6 mt-2 space-y-1">
+          <li>Access your personal information</li>
+          <li>Correct inaccurate information</li>
+          <li>Delete your account</li>
+          <li>Opt-out of marketing communications</li>
+        </ul>
+      </section>
+      
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-3">6. Contact Us</h2>
+        <p>For privacy concerns, contact: privacy@soulseer.com</p>
+      </section>
+    </div>
+  </div>
+</div>
+
+---
+// frontend/src/routes/policies/+page.svelte
+<script>
+  // All Policies Hub Page
+</script>
+
+<div class="min-h-screen max-w-4xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8 text-center">Policies & Legal</h1>
+  
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+    <a href="/terms" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <h3 class="text-xl text-pink-400 mb-2">Terms of Service</h3>
+      <p class="text-gray-400">Our terms and conditions for using SoulSeer</p>
+    </a>
+    
+    <a href="/privacy" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <h3 class="text-xl text-pink-400 mb-2">Privacy Policy</h3>
+      <p class="text-gray-400">How we collect, use, and protect your data</p>
+    </a>
+    
+    <a href="/refund-policy" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <h3 class="text-xl text-pink-400 mb-2">Refund Policy</h3>
+      <p class="text-gray-400">Our refund and dispute resolution process</p>
+    </a>
+    
+    <a href="/reader-agreement" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <h3 class="text-xl text-pink-400 mb-2">Reader Agreement</h3>
+      <p class="text-gray-400">Terms for psychic readers on our platform</p>
+    </a>
+    
+    <a href="/community-guidelines" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <h3 class="text-xl text-pink-400 mb-2">Community Guidelines</h3>
+      <p class="text-gray-400">Rules for participating in our community</p>
+    </a>
+    
+    <a href="/dmca" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <h3 class="text-xl text-pink-400 mb-2">DMCA Policy</h3>
+      <p class="text-gray-400">Copyright and intellectual property protection</p>
+    </a>
+    
+    <a href="/cookie-policy" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <h3 class="text-xl text-pink-400 mb-2">Cookie Policy</h3>
+      <p class="text-gray-400">How we use cookies and tracking</p>
+    </a>
+    
+    <a href="/disclaimer" class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30 hover:border-pink-500 transition">
+      <h3 class="text-xl text-pink-400 mb-2">Disclaimer</h3>
+      <p class="text-gray-400">Important disclaimers about our services</p>
+    </a>
+  </div>
+</div>
+
+
+// ===== 9. READINGS PAGE (COMPLETE) =====
+// frontend/src/routes/readings/+page.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
+  import { userStore, balanceStore } from '$lib/stores';
+  import ReaderCard from '$lib/components/ReaderCard.svelte';
+  import ScheduleModal from '$lib/components/ScheduleModal.svelte';
+  import FilterPanel from '$lib/components/FilterPanel.svelte';
+  
+  let readers = [];
+  let filteredReaders = [];
+  let loading = true;
+  let viewType = $page.url.searchParams.get('type') || 'instant';
+  let selectedReader = null;
+  let showScheduleModal = false;
+  
+  let filters = {
+    service: 'all',
+    specialty: 'all',
+    priceRange: 'all',
+    rating: 'all',
+    availability: viewType === 'instant' ? 'online' : 'all'
+  };
+  
+  let specialties = [
+    'Tarot', 'Mediumship', 'Astrology', 'Energy Healing', 
+    'Dream Analysis', 'Past Lives', 'Love & Relationships',
+    'Career', 'Spirit Guides', 'Akashic Records'
+  ];
+  
+  onMount(async () => {
+    await loadReaders();
+    applyFilters();
+  });
+  
+  async function loadReaders() {
+    const endpoint = viewType === 'instant' 
+      ? '/api/readings/readers/online'
+      : '/api/readings/readers';
+    
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}${endpoint}`);
+    if (res.ok) {
+      const data = await res.json();
+      readers = data.readers;
+      loading = false;
+    }
+  }
+  
+  function applyFilters() {
+    filteredReaders = readers.filter(reader => {
+      // Service type filter
+      if (filters.service !== 'all') {
+        if (filters.service === 'chat' && !reader.chat_rate) return false;
+        if (filters.service === 'phone' && !reader.phone_rate) return false;
+        if (filters.service === 'video' && !reader.video_rate) return false;
+      }
+      
+      // Specialty filter
+      if (filters.specialty !== 'all' && !reader.specialties?.includes(filters.specialty)) {
+        return false;
+      }
+      
+      // Price range filter
+      if (filters.priceRange !== 'all') {
+        const minRate = Math.min(reader.chat_rate || 999, reader.phone_rate || 999, reader.video_rate || 999);
+        if (filters.priceRange === 'low' && minRate > 3) return false;
+        if (filters.priceRange === 'medium' && (minRate < 3 || minRate > 6)) return false;
+        if (filters.priceRange === 'high' && minRate < 6) return false;
+      }
+      
+      // Rating filter
+      if (filters.rating !== 'all') {
+        const rating = reader.rating || 0;
+        if (filters.rating === '4plus' && rating < 4) return false;
+        if (filters.rating === '4.5plus' && rating < 4.5) return false;
+      }
+      
+      // Availability filter
+      if (filters.availability === 'online' && !reader.is_online) return false;
+      
+      return true;
+    });
+  }
+  
+  async function requestInstantReading(reader) {
+    if (!$userStore) {
+      goto('/login?redirect=/readings');
+      return;
+    }
+    
+    if ($balanceStore < (reader.chat_rate || reader.phone_rate || reader.video_rate)) {
+      goto('/dashboard/add-funds');
+      return;
+    }
+    
+    // Create reading request
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/readings/request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        reader_id: reader.id,
+        client_id: $userStore.id,
+        session_type: getPreferredSessionType(reader)
+      })
+    });
+    
+    if (res.ok) {
+      const data = await res.json();
+      goto(`/session/${data.session.id}`);
+    }
+  }
+  
+  function scheduleReading(reader) {
+    if (!$userStore) {
+      goto('/login?redirect=/readings');
+      return;
+    }
+    
+    selectedReader = reader;
+    showScheduleModal = true;
+  }
+  
+  function getPreferredSessionType(reader) {
+    if (reader.video_rate) return 'video';
+    if (reader.phone_rate) return 'phone';
+    return 'chat';
+  }
+  
+  function switchViewType(type) {
+    viewType = type;
+    filters.availability = type === 'instant' ? 'online' : 'all';
+    loadReaders();
+  }
+</script>
+
+<div class="min-h-screen max-w-7xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8 text-center">
+    Connect with a Reader
+  </h1>
+  
+  <!-- View Type Tabs -->
+  <div class="flex justify-center mb-8">
+    <div class="bg-black/50 backdrop-blur-md rounded-lg p-1 border border-pink-500/30">
+      <button
+        on:click={() => switchViewType('instant')}
+        class="px-6 py-2 rounded-lg transition"
+        class:bg-pink-500={viewType === 'instant'}
+        class:text-white={viewType === 'instant'}
+        class:text-gray-400={viewType !== 'instant'}
+      >
+        Instant Readings
+      </button>
+      <button
+        on:click={() => switchViewType('scheduled')}
+        class="px-6 py-2 rounded-lg transition"
+        class:bg-pink-500={viewType === 'scheduled'}
+        class:text-white={viewType === 'scheduled'}
+        class:text-gray-400={viewType !== 'scheduled'}
+      >
+        Schedule for Later
+      </button>
+    </div>
+  </div>
+  
+  <div class="grid grid-cols-1 lg:grid-cols-4 gap-8">
+    <!-- Filters Sidebar -->
+    <div class="lg:col-span-1">
+      <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 border border-pink-500/30">
+        <h3 class="text-xl text-pink-400 mb-4">Filters</h3>
+        
+        <!-- Service Type -->
+        <div class="mb-6">
+          <label class="block text-gray-400 mb-2">Service Type</label>
+          <select
+            bind:value={filters.service}
+            on:change={applyFilters}
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-3 py-2 text-white"
+          >
+            <option value="all">All Types</option>
+            <option value="chat">Chat Only</option>
+            <option value="phone">Phone Only</option>
+            <option value="video">Video Only</option>
+          </select>
+        </div>
+        
+        <!-- Specialty -->
+        <div class="mb-6">
+          <label class="block text-gray-400 mb-2">Specialty</label>
+          <select
+            bind:value={filters.specialty}
+            on:change={applyFilters}
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-3 py-2 text-white"
+          >
+            <option value="all">All Specialties</option>
+            {#each specialties as specialty}
+              <option value={specialty}>{specialty}</option>
+            {/each}
+          </select>
+        </div>
+        
+        <!-- Price Range -->
+        <div class="mb-6">
+          <label class="block text-gray-400 mb-2">Price Range</label>
+          <select
+            bind:value={filters.priceRange}
+            on:change={applyFilters}
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-3 py-2 text-white"
+          >
+            <option value="all">All Prices</option>
+            <option value="low">Under $3/min</option>
+            <option value="medium">$3-6/min</option>
+            <option value="high">Over $6/min</option>
+          </select>
+        </div>
+        
+        <!-- Rating -->
+        <div class="mb-6">
+          <label class="block text-gray-400 mb-2">Rating</label>
+          <select
+            bind:value={filters.rating}
+            on:change={applyFilters}
+            class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-3 py-2 text-white"
+          >
+            <option value="all">Any Rating</option>
+            <option value="4plus">4+ Stars</option>
+            <option value="4.5plus">4.5+ Stars</option>
+          </select>
+        </div>
+        
+        <button
+          on:click={() => {
+            filters = {
+              service: 'all',
+              specialty: 'all',
+              priceRange: 'all',
+              rating: 'all',
+              availability: viewType === 'instant' ? 'online' : 'all'
+            };
+            applyFilters();
+          }}
+          class="w-full text-pink-400 hover:text-pink-300 text-sm"
+        >
+          Clear All Filters
+        </button>
+      </div>
+    </div>
+    
+    <!-- Readers Grid -->
+    <div class="lg:col-span-3">
+      {#if loading}
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {#each Array(6) as _}
+            <div class="bg-black/50 backdrop-blur-md rounded-lg p-4 animate-pulse">
+              <div class="aspect-square bg-gray-700 rounded-lg mb-4"></div>
+              <div class="h-4 bg-gray-700 rounded mb-2"></div>
+              <div class="h-3 bg-gray-700 rounded w-2/3"></div>
+            </div>
+          {/each}
+        </div>
+      {:else if filteredReaders.length === 0}
+        <div class="text-center py-12">
+          <svg class="w-16 h-16 mx-auto mb-4 text-pink-500/50" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+          <p class="text-gray-400 text-lg mb-4">No readers match your criteria</p>
+          <button
+            on:click={() => {
+              filters = {
+                service: 'all',
+                specialty: 'all',
+                priceRange: 'all',
+                rating: 'all',
+                availability: 'all'
+              };
+              applyFilters();
+            }}
+            class="btn-secondary"
+          >
+            Clear Filters
+          </button>
+        </div>
+      {:else}
+        <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {#each filteredReaders as reader}
+            <ReaderCard 
+              {reader}
+              on:instant={() => requestInstantReading(reader)}
+              on:schedule={() => scheduleReading(reader)}
+              showScheduleButton={viewType === 'scheduled'}
+            />
+          {/each}
+        </div>
+      {/if}
+    </div>
+  </div>
+</div>
+
+{#if showScheduleModal}
+  <ScheduleModal
+    reader={selectedReader}
+    on:close={() => showScheduleModal = false}
+    on:confirm={async (e) => {
+      // Handle scheduling
+      const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/readings/schedule`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reader_id: selectedReader.id,
+          client_id: $userStore.id,
+          ...e.detail
+        })
+      });
+      
+      if (res.ok) {
+        showScheduleModal = false;
+        goto('/dashboard?tab=upcoming');
+      }
+    }}
+  />
+{/if}
+
+---
+// ===== 10. LIVE STREAMING PAGE (COMPLETE) =====
+// frontend/src/routes/live/+page.svelte
+<script>
+  import { onMount, onDestroy } from 'svelte';
+  import { userStore, webSocketStore } from '$lib/stores';
+  import StreamViewer from '$lib/components/StreamViewer.svelte';
+  import GiftPanel from '$lib/components/GiftPanel.svelte';
+  import StartStreamModal from '$lib/components/StartStreamModal.svelte';
+  
+  let activeStreams = [];
+  let upcomingStreams = [];
+  let selectedStream = null;
+  let viewerCount = 0;
+  let showStartStreamModal = false;
+  let loading = true;
+  
+  onMount(async () => {
+    await loadStreams();
+    
+    // Join homepage room for updates
+    if ($webSocketStore) {
+      $webSocketStore.send(JSON.stringify({
+        type: 'join_room',
+        room_id: 'live_page'
+      }));
+    }
+  });
+  
+  onDestroy(() => {
+    if ($webSocketStore && selectedStream) {
+      $webSocketStore.send(JSON.stringify({
+        type: 'leave_room',
+        room_id: `stream_${selectedStream.id}`
+      }));
+    }
+  });
+  
+  async function loadStreams() {
+    const [activeRes, upcomingRes] = await Promise.all([
+      fetch(`${import.meta.env.PUBLIC_API_URL}/api/streaming/active`),
+      fetch(`${import.meta.env.PUBLIC_API_URL}/api/streaming/upcoming`)
+    ]);
+    
+    if (activeRes.ok) {
+      const data = await activeRes.json();
+      activeStreams = data.streams;
+    }
+    
+    if (upcomingRes.ok) {
+      const data = await upcomingRes.json();
+      upcomingStreams = data.streams;
+    }
+    
+    loading = false;
+  }
+  
+  async function joinStream(stream) {
+    selectedStream = stream;
+    
+    // Join stream room
+    if ($webSocketStore) {
+      $webSocketStore.send(JSON.stringify({
+        type: 'join_room',
+        room_id: `stream_${stream.id}`
+      }));
+    }
+    
+    // Update viewer count
+    await fetch(`${import.meta.env.PUBLIC_API_URL}/api/streaming/join/${stream.id}`, {
+      method: 'POST'
+    });
+  }
+  
+  async function leaveStream() {
+    if (selectedStream && $webSocketStore) {
+      $webSocketStore.send(JSON.stringify({
+        type: 'leave_room',
+        room_id: `stream_${selectedStream.id}`
+      }));
+      
+      await fetch(`${import.meta.env.PUBLIC_API_URL}/api/streaming/leave/${selectedStream.id}`, {
+        method: 'POST'
+      });
+    }
+    
+    selectedStream = null;
+  }
+  
+  async function startStream() {
+    if ($userStore?.role !== 'reader') {
+      alert('Only readers can start streams');
+      return;
+    }
+    
+    showStartStreamModal = true;
+  }
+  
+  function formatScheduledTime(date) {
+    return new Date(date).toLocaleString('en-US', {
+      weekday: 'short',
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit'
+    });
+  }
+</script>
+
+<div class="min-h-screen">
+  {#if !selectedStream}
+    <div class="max-w-7xl mx-auto px-4 py-8">
+      <div class="flex justify-between items-center mb-8">
+        <h1 class="alex-brush text-5xl text-pink-500 glow">Live Streams</h1>
+        {#if $userStore?.role === 'reader'}
+          <button on:click={startStream} class="btn-primary">
+            Start Stream
+          </button>
+        {/if}
+      </div>
+      
+      <!-- Active Streams -->
+      <section class="mb-12">
+        <h2 class="text-2xl text-pink-400 mb-6">Live Now</h2>
+        
+        {#if loading}
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {#each Array(3) as _}
+              <div class="bg-black/50 backdrop-blur-md rounded-lg p-4 animate-pulse">
+                <div class="aspect-video bg-gray-700 rounded-lg mb-4"></div>
+                <div class="h-4 bg-gray-700 rounded mb-2"></div>
+                <div class="h-3 bg-gray-700 rounded w-2/3"></div>
+              </div>
+            {/each}
+          </div>
+        {:else if activeStreams.length === 0}
+          <div class="bg-black/50 backdrop-blur-md rounded-lg p-12 text-center">
+            <svg class="w-16 h-16 mx-auto mb-4 text-pink-500/50" fill="currentColor" viewBox="0 0 20 20">
+              <path d="M2 6a2 2 0 012-2h6a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V6zM14.553 7.106A1 1 0 0014 8v4a1 1 0 00.553.894l2 1A1 1 0 0018 13V7a1 1 0 00-1.447-.894l-2 1z"/>
+            </svg>
+            <p class="text-gray-400 text-lg mb-2">No live streams at the moment</p>
+            <p class="text-gray-500">Check back later or view upcoming streams below</p>
+          </div>
+        {:else}
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+            {#each activeStreams as stream}
+              <div class="bg-black/50 backdrop-blur-md rounded-lg overflow-hidden border border-pink-500/30 hover:border-pink-500 transition">
+                <div class="aspect-video bg-gradient-to-br from-pink-500/20 to-purple-500/20 relative">
+                  {#if stream.thumbnail_url}
+                    <img src={stream.thumbnail_url} alt={stream.title} class="w-full h-full object-cover" />
+                  {/if}
+                  <div class="absolute top-2 right-2 bg-red-600 text-white text-xs px-2 py-1 rounded">
+                    LIVE
+                  </div>
+                  <div class="absolute bottom-2 left-2 bg-black/70 text-white text-sm px-2 py-1 rounded">
+                    {stream.viewer_count} viewers
+                  </div>
+                </div>
+                <div class="p-4">
+                  <h3 class="text-lg text-white mb-1">{stream.title}</h3>
+                  <p class="text-pink-400 mb-3">{stream.reader_name}</p>
+                  <button
+                    on:click={() => joinStream(stream)}
+                    class="w-full bg-pink-500 text-white py-2 rounded-lg hover:bg-pink-600 transition"
+                  >
+                    Join Stream
+                  </button>
+                </div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </section>
+      
+      <!-- Upcoming Streams -->
+      <section>
+        <h2 class="text-2xl text-pink-400 mb-6">Upcoming Streams</h2>
+        
+        {#if upcomingStreams.length === 0}
+          <p class="text-gray-400">No scheduled streams</p>
+        {:else}
+          <div class="space-y-4">
+            {#each upcomingStreams as stream}
+              <div class="bg-black/50 backdrop-blur-md rounded-lg p-4 flex justify-between items-center border border-pink-500/30">
+                <div>
+                  <h3 class="text-lg text-white">{stream.title}</h3>
+                  <p class="text-pink-400">{stream.reader_name}</p>
+                  <p class="text-gray-400 text-sm">{formatScheduledTime(stream.scheduled_for)}</p>
+                </div>
+                <button class="btn-secondary">
+                  Set Reminder
+                </button>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </section>
+    </div>
+  {:else}
+    <!-- Stream Viewer -->
+    <StreamViewer 
+      stream={selectedStream}
+      on:leave={leaveStream}
+    />
+  {/if}
+</div>
+
+{#if showStartStreamModal}
+  <StartStreamModal
+    on:close={() => showStartStreamModal = false}
+    on:start={async (e) => {
+      const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/streaming/start`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          reader_id: $userStore.id,
+          ...e.detail
+        })
+      });
+      
+      if (res.ok) {
+        showStartStreamModal = false;
+        await loadStreams();
+      }
+    }}
+  />
+{/if}
+
+---
+// ===== 11. SHOP PAGE (COMPLETE) =====
+// frontend/src/routes/shop/+page.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { cartStore } from '$lib/stores';
+  import ProductCard from '$lib/components/ProductCard.svelte';
+  import CartSidebar from '$lib/components/CartSidebar.svelte';
+  
+  let products = [];
+  let categories = [];
+  let selectedCategory = 'all';
+  let selectedType = 'all';
+  let sortBy = 'featured';
+  let showCart = false;
+  let loading = true;
+  
+  onMount(async () => {
+    await Promise.all([loadProducts(), loadCategories()]);
+    loading = false;
+  });
+  
+  async function loadProducts() {
+    let url = `${import.meta.env.PUBLIC_API_URL}/api/marketplace/products?`;
+    
+    if (selectedCategory !== 'all') {
+      url += `category=${selectedCategory}&`;
+    }
+    if (selectedType !== 'all') {
+      url += `type=${selectedType}&`;
+    }
+    
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      products = data.products;
+      sortProducts();
+    }
+  }
+  
+  async function loadCategories() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/marketplace/categories`);
+    if (res.ok) {
+      categories = await res.json();
+    }
+  }
+  
+  function sortProducts() {
+    switch(sortBy) {
+      case 'price-low':
+        products = products.sort((a, b) => a.price - b.price);
+        break;
+      case 'price-high':
+        products = products.sort((a, b) => b.price - a.price);
+        break;
+      case 'rating':
+        products = products.sort((a, b) => (b.rating || 0) - (a.rating || 0));
+        break;
+      case 'featured':
+      default:
+        products = products.sort((a, b) => b.is_featured - a.is_featured);
+    }
+  }
+  
+  function addToCart(product) {
+    cartStore.addItem(product);
+    showCart = true;
+  }
+  
+  $: if (selectedCategory || selectedType) {
+    loadProducts();
+  }
+  
+  $: if (sortBy) {
+    sortProducts();
+  }
+</script>
+
+<div class="min-h-screen max-w-7xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8 text-center">Mystical Shop</h1>
+  
+  <!-- Filters Bar -->
+  <div class="bg-black/50 backdrop-blur-md rounded-lg p-4 mb-8 border border-pink-500/30">
+    <div class="grid grid-cols-1 md:grid-cols-4 gap-4">
+      <!-- Category Filter -->
+      <div>
+        <label class="block text-gray-400 text-sm mb-1">Category</label>
+        <select
+          bind:value={selectedCategory}
+          class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-3 py-2 text-white"
+        >
+          <option value="all">All Categories</option>
+          {#each categories as category}
+            <option value={category.slug}>{category.name}</option>
+          {/each}
+        </select>
+      </div>
+      
+      <!-- Type Filter -->
+      <div>
+        <label class="block text-gray-400 text-sm mb-1">Type</label>
+        <select
+          bind:value={selectedType}
+          class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-3 py-2 text-white"
+        >
+          <option value="all">All Types</option>
+          <option value="service">Services</option>
+          <option value="digital">Digital Products</option>
+          <option value="physical">Physical Items</option>
+        </select>
+      </div>
+      
+      <!-- Sort By -->
+      <div>
+        <label class="block text-gray-400 text-sm mb-1">Sort By</label>
+        <select
+          bind:value={sortBy}
+          class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-3 py-2 text-white"
+        >
+          <option value="featured">Featured</option>
+          <option value="price-low">Price: Low to High</option>
+          <option value="price-high">Price: High to Low</option>
+          <option value="rating">Best Rated</option>
+        </select>
+      </div>
+      
+      <!-- Cart Button -->
+      <div class="flex items-end">
+        <button
+          on:click={() => showCart = !showCart}
+          class="w-full bg-pink-500 text-white py-2 rounded-lg hover:bg-pink-600 transition flex items-center justify-center"
+        >
+          <svg class="w-5 h-5 mr-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 3h2l.4 2M7 13h10l4-8H5.4M7 13L5.4 5M7 13l-2.293 2.293c-.63.63-.184 1.707.707 1.707H17m0 0a2 2 0 100 4 2 2 0 000-4zm-8 2a2 2 0 11-4 0 2 2 0 014 0z"/>
+          </svg>
+          Cart ({$cartStore.items.length})
+        </button>
+      </div>
+    </div>
+  </div>
+  
+  <!-- Products Grid -->
+  {#if loading}
+    <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+      {#each Array(8) as _}
+        <div class="bg-black/50 backdrop-blur-md rounded-lg p-4 animate-pulse">
+          <div class="aspect-square bg-gray-700 rounded-lg mb-4"></div>
+          <div class="h-4 bg-gray-700 rounded mb-2"></div>
+          <div class="h-3 bg-gray-700 rounded w-2/3"></div>
+        </div>
+      {/each}
+    </div>
+  {:else if products.length === 0}
+    <div class="text-center py-12">
+      <p class="text-gray-400 text-lg">No products found</p>
+    </div>
+  {:else}
+    <div class="grid grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-6">
+      {#each products as product}
+        <ProductCard 
+          {product}
+          on:addToCart={() => addToCart(product)}
+        />
+      {/each}
+    </div>
+  {/if}
+</div>
+
+{#if showCart}
+  <CartSidebar
+    on:close={() => showCart = false}
+  />
+{/if}
+
+---
+// ===== 12. COMMUNITY PAGE (COMPLETE) =====
+// frontend/src/routes/community/+page.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { userStore } from '$lib/stores';
+  import CreatePostModal from '$lib/components/CreatePostModal.svelte';
+  import ForumPost from '$lib/components/ForumPost.svelte';
+  
+  let categories = [];
+  let posts = [];
+  let selectedCategory = 'all';
+  let sortBy = 'recent';
+  let showCreatePost = false;
+  let loading = true;
+  
+  onMount(async () => {
+    await Promise.all([loadCategories(), loadPosts()]);
+    loading = false;
+  });
+  
+  async function loadCategories() {
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/community/categories`);
+    if (res.ok) {
+      categories = await res.json();
+    }
+  }
+  
+  async function loadPosts() {
+    let url = `${import.meta.env.PUBLIC_API_URL}/api/community/posts?`;
+    
+    if (selectedCategory !== 'all') {
+      url += `category=${selectedCategory}&`;
+    }
+    
+    const res = await fetch(url);
+    if (res.ok) {
+      const data = await res.json();
+      posts = data.posts;
+      sortPosts();
+    }
+  }
+  
+  function sortPosts() {
+    switch(sortBy) {
+      case 'popular':
+        posts = posts.sort((a, b) => b.like_count - a.like_count);
+        break;
+      case 'discussed':
+        posts = posts.sort((a, b) => b.comment_count - a.comment_count);
+        break;
+      case 'recent':
+      default:
+        posts = posts.sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    }
+  }
+  
+  function createPost() {
+    if (!$userStore) {
+      goto('/login?redirect=/community');
+      return;
+    }
+    showCreatePost = true;
+  }
+  
+  $: if (selectedCategory) {
+    loadPosts();
+  }
+  
+  $: if (sortBy) {
+    sortPosts();
+  }
+</script>
+
+<div class="min-h-screen max-w-6xl mx-auto px-4 py-8">
+  <div class="flex justify-between items-center mb-8">
+    <h1 class="alex-brush text-5xl text-pink-500 glow">Community Forum</h1>
+    <button on:click={createPost} class="btn-primary">
+      New Post
+    </button>
+  </div>
+  
+  <!-- Filters -->
+  <div class="bg-black/50 backdrop-blur-md rounded-lg p-4 mb-8 border border-pink-500/30">
+    <div class="flex flex-wrap gap-4">
+      <!-- Categories -->
+      <div class="flex-1">
+        <div class="flex gap-2 overflow-x-auto">
+          <button
+            on:click={() => selectedCategory = 'all'}
+            class="px-4 py-2 rounded-lg whitespace-nowrap transition"
+            class:bg-pink-500={selectedCategory === 'all'}
+            class:text-white={selectedCategory === 'all'}
+            class:bg-black/50={selectedCategory !== 'all'}
+            class:text-gray-400={selectedCategory !== 'all'}
+          >
+            All Topics
+          </button>
+          {#each categories as category}
+            <button
+              on:click={() => selectedCategory = category.slug}
+              class="px-4 py-2 rounded-lg whitespace-nowrap transition"
+              class:bg-pink-500={selectedCategory === category.slug}
+              class:text-white={selectedCategory === category.slug}
+              class:bg-black/50={selectedCategory !== category.slug}
+              class:text-gray-400={selectedCategory !== category.slug}
+            >
+              {category.name}
+            </button>
+          {/each}
+        </div>
+      </div>
+      
+      <!-- Sort -->
+      <select
+        bind:value={sortBy}
+        class="bg-black/50 border border-pink-500/30 rounded-lg px-4 py-2 text-white"
+      >
+        <option value="recent">Most Recent</option>
+        <option value="popular">Most Popular</option>
+        <option value="discussed">Most Discussed</option>
+      </select>
+    </div>
+  </div>
+  
+  <!-- Posts -->
+  {#if loading}
+    <div class="space-y-4">
+      {#each Array(5) as _}
+        <div class="bg-black/50 backdrop-blur-md rounded-lg p-6 animate-pulse">
+          <div class="h-4 bg-gray-700 rounded w-1/3 mb-2"></div>
+          <div class="h-3 bg-gray-700 rounded w-2/3"></div>
+        </div>
+      {/each}
+    </div>
+  {:else if posts.length === 0}
+    <div class="text-center py-12 bg-black/50 backdrop-blur-md rounded-lg">
+      <p class="text-gray-400 text-lg mb-4">No posts yet in this category</p>
+      <button on:click={createPost} class="btn-secondary">
+        Be the first to post
+      </button>
+    </div>
+  {:else}
+    <div class="space-y-4">
+      {#each posts as post}
+        <ForumPost {post} on:refresh={loadPosts} />
+      {/each}
+    </div>
+  {/if}
+</div>
+
+{#if showCreatePost}
+  <CreatePostModal
+    {categories}
+    on:close={() => showCreatePost = false}
+    on:created={() => {
+      showCreatePost = false;
+      loadPosts();
+    }}
+  />
+{/if}
+
+---
+// ===== 13. ADD FUNDS PAGE =====
+// frontend/src/routes/dashboard/add-funds/+page.svelte
+<script>
+  import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { userStore, balanceStore } from '$lib/stores';
+  import { loadStripe } from '@stripe/stripe-js';
+  
+  let stripe;
+  let elements;
+  let cardElement;
+  let processing = false;
+  let error = '';
+  let selectedAmount = 25;
+  let customAmount = '';
+  
+  const amounts = [10, 25, 50, 100, 250, 500];
+  
+  onMount(async () => {
+    stripe = await loadStripe(import.meta.env.PUBLIC_STRIPE_PUBLISHABLE_KEY);
+    elements = stripe.elements();
+    
+    cardElement = elements.create('card', {
+      style: {
+        base: {
+          color: '#ffffff',
+          fontFamily: '"Playfair Display", serif',
+          fontSize: '16px',
+          '::placeholder': {
+            color: '#6b7280'
+          }
+        }
+      }
+    });
+    
+    cardElement.mount('#card-element');
+  });
+  
+  async function handleSubmit() {
+    processing = true;
+    error = '';
+    
+    const amount = customAmount || selectedAmount;
+    
+    if (amount < 5) {
+      error = 'Minimum deposit is $5';
+      processing = false;
+      return;
+    }
+    
+    // Create payment intent
+    const res = await fetch(`${import.meta.env.PUBLIC_API_URL}/api/payments/add-funds`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        amount: amount,
+        client_id: $userStore.id
+      })
+    });
+    
+    if (!res.ok) {
+      error = 'Failed to process payment';
+      processing = false;
+      return;
+    }
+    
+    const { client_secret } = await res.json();
+    
+    // Confirm payment
+    const result = await stripe.confirmCardPayment(client_secret, {
+      payment_method: {
+        card: cardElement
+      }
+    });
+    
+    if (result.error) {
+      error = result.error.message;
+    } else {
+      // Update balance
+      balanceStore.update(n => n + amount);
+      goto('/dashboard');
+    }
+    
+    processing = false;
+  }
+</script>
+
+<div class="min-h-screen max-w-2xl mx-auto px-4 py-8">
+  <h1 class="alex-brush text-5xl text-pink-500 glow mb-8 text-center">Add Funds</h1>
+  
+  <div class="bg-black/50 backdrop-blur-md rounded-lg p-8 border border-pink-500/30">
+    <!-- Current Balance -->
+    <div class="text-center mb-8">
+      <p class="text-gray-400">Current Balance</p>
+      <p class="text-3xl text-white font-bold">${$balanceStore.toFixed(2)}</p>
+    </div>
+    
+    <!-- Amount Selection -->
+    <div class="mb-8">
+      <label class="block text-gray-400 mb-4">Select Amount</label>
+      <div class="grid grid-cols-3 gap-4 mb-4">
+        {#each amounts as amount}
+          <button
+            on:click={() => {
+              selectedAmount = amount;
+              customAmount = '';
+            }}
+            class="p-4 rounded-lg border transition"
+            class:bg-pink-500={selectedAmount === amount && !customAmount}
+            class:border-pink-500={selectedAmount === amount && !customAmount}
+            class:bg-black/50={selectedAmount !== amount || customAmount}
+            class:border-pink-500/30={selectedAmount !== amount || customAmount}
+          >
+            ${amount}
+          </button>
+        {/each}
+      </div>
+      
+      <input
+        type="number"
+        placeholder="Custom amount"
+        bind:value={customAmount}
+        on:input={() => selectedAmount = null}
+        min="5"
+        class="w-full bg-black/50 border border-pink-500/30 rounded-lg px-4 py-3 text-white focus:outline-none focus:border-pink-500"
+      />
+    </div>
+    
+    <!-- Card Element -->
+    <div class="mb-8">
+      <label class="block text-gray-400 mb-4">Payment Method</label>
+      <div id="card-element" class="bg-black/50 border border-pink-500/30 rounded-lg p-4"></div>
+    </div>
+    
+    {#if error}
+      <div class="bg-red-500/20 border border-red-500 rounded-lg p-3 mb-6">
+        <p class="text-red-400">{error}</p>
+      </div>
+    {/if}
+    
+    <!-- Submit Button -->
+    <button
+      on:click={handleSubmit}
+      disabled={processing}
+      class="w-full bg-pink-500 text-white py-3 rounded-lg hover:bg-pink-600 transition disabled:opacity-50"
+    >
+      {processing ? 'Processing...' : `Add $${customAmount || selectedAmount} to Balance`}
+    </button>
+    
+    <!-- Security Note -->
+    <p class="text-center text-gray-500 text-sm mt-6">
+      <svg class="inline w-4 h-4 mr-1" fill="currentColor" viewBox="0 0 20 20">
+        <path fill-rule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clip-rule="evenodd"/>
+      </svg>
+      Secure payment processed by Stripe
+    </p>
+  </div>
+</div>
+
