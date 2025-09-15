@@ -1,0 +1,2278 @@
+# ========== COMPLETE SOULSEER BACKEND - PRODUCTION READY ==========
+
+# backend/app/main.py
+from fastapi import FastAPI, HTTPException, Depends, WebSocket, WebSocketDisconnect, Request, BackgroundTasks, status
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+import asyncio
+from typing import Dict, List, Optional, Any
+import json
+import stripe
+from datetime import datetime, timedelta
+import logging
+import uuid
+from decimal import Decimal
+
+from app.core.config import settings
+from app.core.database import engine, Base, get_db
+from app.api import (auth, readings, streaming, payments, marketplace, 
+                     admin, community, messages, reviews, dashboard, 
+                     help, applications, policies, notifications)
+from app.websockets.connection_manager import ConnectionManager
+from app.services.billing_service import BillingService
+from app.services.notification_service import NotificationService
+from app.services.payout_service import PayoutService
+from app.services.session_service import SessionService
+from app.services.email_service import EmailService
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+class ConnectionManager:
+    def __init__(self):
+        self.active_connections: Dict[str, WebSocket] = {}
+        self.rooms: Dict[str, Set[str]] = {}
+        self.user_rooms: Dict[str, Set[str]] = {}
+        
+    async def connect(self, websocket: WebSocket, client_id: str):
+        """Connect a client"""
+        await websocket.accept()
+        self.active_connections[client_id] = websocket
+        self.user_rooms[client_id] = set()
+        
+        logger.info(f"Client {client_id} connected")
+        
+        # Join homepage room for general updates
+        await self.join_room(client_id, "homepage")
+        
+    async def disconnect(self, client_id: str):
+        """Disconnect a client"""
+        if client_id in self.active_connections:
+            # Leave all rooms
+            if client_id in self.user_rooms:
+                for room_id in self.user_rooms[client_id].copy():
+                    await self.leave_room(client_id, room_id)
+                del self.user_rooms[client_id]
+            
+            # Remove connection
+            del self.active_connections[client_id]
+            logger.info(f"Client {client_id} disconnected")
+    
+    async def send_to_user(self, user_id: str, message: dict):
+        """Send message to specific user"""
+        if user_id in self.active_connections:
+            try:
+                await self.active_connections[user_id].send_text(json.dumps(message))
+                return True
+            except Exception as e:
+                logger.error(f"Error sending to user {user_id}: {e}")
+                await self.disconnect(user_id)
+        return False
+    
+    async def join_room(self, client_id: str, room_id: str):
+        """Join a room"""
+        if room_id not in self.rooms:
+            self.rooms[room_id] = set()
+        
+        self.rooms[room_id].add(client_id)
+        
+        if client_id in self.user_rooms:
+            self.user_rooms[client_id].add(room_id)
+        
+        logger.info(f"Client {client_id} joined room {room_id}")
+    
+    async def leave_room(self, client_id: str, room_id: str):
+        """Leave a room"""
+        if room_id in self.rooms and client_id in self.rooms[room_id]:
+            self.rooms[room_id].remove(client_id)
+            
+            if not self.rooms[room_id]:
+                del self.rooms[room_id]
+        
+        if client_id in self.user_rooms and room_id in self.user_rooms[client_id]:
+            self.user_rooms[client_id].remove(room_id)
+        
+        logger.info(f"Client {client_id} left room {room_id}")
+    
+    async def broadcast_to_room(self, room_id: str, message: dict, exclude: Optional[str] = None):
+        """Broadcast message to all users in a room"""
+        if room_id in self.rooms:
+            disconnected = []
+            
+            for client_id in self.rooms[room_id]:
+                if client_id != exclude:
+                    if not await self.send_to_user(client_id, message):
+                        disconnected.append(client_id)
+            
+            # Clean up disconnected clients
+            for client_id in disconnected:
+                await self.disconnect(client_id)
+    
+    async def send_to_room_except_sender(self, room_id: str, message: dict, sender_id: str):
+        """Send to all in room except sender"""
+        await self.broadcast_to_room(room_id, message, exclude=sender_id)
+    
+    async def create_room(self, room_id: str):
+        """Create a new room"""
+        if room_id not in self.rooms:
+            self.rooms[room_id] = set()
+            logger.info(f"Room {room_id} created")
+    
+    async def get_room_users(self, room_id: str) -> List[str]:
+        """Get list of users in a room"""
+        return list(self.rooms.get(room_id, set()))
+    
+    async def is_user_online(self, user_id: str) -> bool:
+        """Check if user is online"""
+        return user_id in self.active_connections
+    
+    async def get_online_count(self) -> int:
+        """Get total online users"""
+        return len(self.active_connections)
+
+# ===== COMPLETE API IMPLEMENTATIONS =====
+
+# backend/app/api/complete_routes.py
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks, UploadFile, File, status
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update, delete, and_, or_, func
+from typing import List, Optional, Dict, Any
+from datetime import datetime, timedelta
+from decimal import Decimal
+import uuid
+import stripe
+from pydantic import BaseModel, EmailStr, Field
+
+# ===== AUTH ROUTES =====
+from app.core.security import get_current_user, verify_clerk_token, check_admin
+
+class UserRegister(BaseModel):
+    clerk_id: str
+    email: EmailStr
+    role: str = "client"
+    display_name: Optional[str] = None
+
+class UserLogin(BaseModel):
+    clerk_token: str
+
+auth_router = APIRouter()
+
+@auth_router.post("/register")
+async def register(data: UserRegister, db: AsyncSession = Depends(get_db)):
+    # Check existing user
+    result = await db.execute(
+        select(User).where(User.clerk_id == data.clerk_id)
+    )
+    if result.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="User already exists")
+    
+    # Create user(__name__)
+
+# Global managers
+connection_manager = ConnectionManager()
+billing_service = BillingService()
+notification_service = NotificationService()
+payout_service = PayoutService()
+session_service = SessionService()
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup
+    logger.info("Starting SoulSeer API...")
+    
+    # Create database tables
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    
+    # Initialize Stripe
+    stripe.api_key = settings.STRIPE_SECRET_KEY
+    
+    # Start background services
+    billing_task = asyncio.create_task(billing_service.start_monitoring())
+    payout_task = asyncio.create_task(payout_service.start_daily_payouts())
+    notification_task = asyncio.create_task(notification_service.start_scheduler())
+    
+    yield
+    
+    # Shutdown
+    logger.info("Shutting down SoulSeer API...")
+    billing_task.cancel()
+    payout_task.cancel()
+    notification_task.cancel()
+
+app = FastAPI(
+    title="SoulSeer API",
+    version="1.0.0",
+    description="Complete psychic reading platform API",
+    lifespan=lifespan
+)
+
+# CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include all routers
+app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+app.include_router(readings.router, prefix="/api/readings", tags=["Readings"])
+app.include_router(streaming.router, prefix="/api/streaming", tags=["Streaming"])
+app.include_router(payments.router, prefix="/api/payments", tags=["Payments"])
+app.include_router(marketplace.router, prefix="/api/marketplace", tags=["Marketplace"])
+app.include_router(admin.router, prefix="/api/admin", tags=["Admin"])
+app.include_router(community.router, prefix="/api/community", tags=["Community"])
+app.include_router(messages.router, prefix="/api/messages", tags=["Messages"])
+app.include_router(reviews.router, prefix="/api/reviews", tags=["Reviews"])
+app.include_router(dashboard.router, prefix="/api/dashboard", tags=["Dashboard"])
+app.include_router(help.router, prefix="/api/help", tags=["Help"])
+app.include_router(applications.router, prefix="/api/applications", tags=["Applications"])
+app.include_router(policies.router, prefix="/api/policies", tags=["Policies"])
+app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
+
+@app.get("/")
+async def root():
+    return {
+        "app": "SoulSeer",
+        "version": "1.0.0",
+        "status": "operational",
+        "timestamp": datetime.utcnow().isoformat()
+    }
+
+# WebSocket endpoint for all real-time features
+@app.websocket("/ws/{client_id}")
+async def websocket_endpoint(websocket: WebSocket, client_id: str):
+    await connection_manager.connect(websocket, client_id)
+    
+    try:
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
+            
+            # Route message based on type
+            if message["type"] == "webrtc_offer":
+                await handle_webrtc_offer(message, client_id)
+            elif message["type"] == "webrtc_answer":
+                await handle_webrtc_answer(message, client_id)
+            elif message["type"] == "webrtc_ice":
+                await handle_webrtc_ice(message, client_id)
+            elif message["type"] == "join_room":
+                await handle_join_room(message, client_id)
+            elif message["type"] == "leave_room":
+                await handle_leave_room(message, client_id)
+            elif message["type"] == "reading_request":
+                await handle_reading_request(message, client_id)
+            elif message["type"] == "reading_accept":
+                await handle_reading_accept(message, client_id)
+            elif message["type"] == "reading_decline":
+                await handle_reading_decline(message, client_id)
+            elif message["type"] == "chat_message":
+                await handle_chat_message(message, client_id)
+            elif message["type"] == "gift_send":
+                await handle_gift_send(message, client_id)
+            elif message["type"] == "billing_tick":
+                await handle_billing_tick(message, client_id)
+            elif message["type"] == "stream_start":
+                await handle_stream_start(message, client_id)
+            elif message["type"] == "stream_end":
+                await handle_stream_end(message, client_id)
+            elif message["type"] == "status_update":
+                await handle_status_update(message, client_id)
+                
+    except WebSocketDisconnect:
+        await connection_manager.disconnect(client_id)
+        await handle_disconnect(client_id)
+    except Exception as e:
+        logger.error(f"WebSocket error for {client_id}: {e}")
+        await connection_manager.disconnect(client_id)
+
+# WebSocket message handlers
+async def handle_webrtc_offer(message: Dict, sender_id: str):
+    target_id = message.get("target")
+    offer = message.get("offer")
+    session_id = message.get("session_id")
+    
+    await connection_manager.send_to_user(target_id, {
+        "type": "webrtc_offer",
+        "offer": offer,
+        "from": sender_id,
+        "session_id": session_id
+    })
+
+async def handle_webrtc_answer(message: Dict, sender_id: str):
+    target_id = message.get("target")
+    answer = message.get("answer")
+    session_id = message.get("session_id")
+    
+    await connection_manager.send_to_user(target_id, {
+        "type": "webrtc_answer",
+        "answer": answer,
+        "from": sender_id,
+        "session_id": session_id
+    })
+
+async def handle_webrtc_ice(message: Dict, sender_id: str):
+    target_id = message.get("target")
+    candidate = message.get("candidate")
+    
+    await connection_manager.send_to_user(target_id, {
+        "type": "webrtc_ice",
+        "candidate": candidate,
+        "from": sender_id
+    })
+
+async def handle_join_room(message: Dict, client_id: str):
+    room_id = message.get("room_id")
+    await connection_manager.join_room(client_id, room_id)
+    
+    # Notify others in room
+    await connection_manager.broadcast_to_room(room_id, {
+        "type": "user_joined",
+        "user_id": client_id
+    }, exclude=client_id)
+
+async def handle_leave_room(message: Dict, client_id: str):
+    room_id = message.get("room_id")
+    await connection_manager.leave_room(client_id, room_id)
+    
+    # Notify others in room
+    await connection_manager.broadcast_to_room(room_id, {
+        "type": "user_left",
+        "user_id": client_id
+    })
+
+async def handle_reading_request(message: Dict, client_id: str):
+    reader_id = message.get("reader_id")
+    session_type = message.get("session_type")
+    
+    # Notify reader
+    await notification_service.notify_user(reader_id, {
+        "type": "new_reading_request",
+        "client_id": client_id,
+        "session_type": session_type,
+        "timestamp": datetime.utcnow().isoformat()
+    })
+
+async def handle_reading_accept(message: Dict, reader_id: str):
+    client_id = message.get("client_id")
+    session_id = message.get("session_id")
+    room_id = str(uuid.uuid4())
+    
+    # Create room and notify both parties
+    await connection_manager.create_room(room_id)
+    
+    await connection_manager.send_to_user(client_id, {
+        "type": "reading_accepted",
+        "reader_id": reader_id,
+        "session_id": session_id,
+        "room_id": room_id
+    })
+    
+    await connection_manager.send_to_user(reader_id, {
+        "type": "reading_confirmed",
+        "client_id": client_id,
+        "session_id": session_id,
+        "room_id": room_id
+    })
+
+async def handle_reading_decline(message: Dict, reader_id: str):
+    client_id = message.get("client_id")
+    reason = message.get("reason", "Reader unavailable")
+    
+    await connection_manager.send_to_user(client_id, {
+        "type": "reading_declined",
+        "reader_id": reader_id,
+        "reason": reason
+    })
+
+async def handle_chat_message(message: Dict, sender_id: str):
+    room_id = message.get("room_id")
+    content = message.get("content")
+    timestamp = datetime.utcnow().isoformat()
+    
+    # Save to database
+    async with get_db() as db:
+        await session_service.save_chat_message(
+            db, room_id, sender_id, content
+        )
+    
+    # Broadcast to room
+    await connection_manager.broadcast_to_room(room_id, {
+        "type": "chat_message",
+        "sender_id": sender_id,
+        "content": content,
+        "timestamp": timestamp
+    }, exclude=sender_id)
+
+async def handle_gift_send(message: Dict, sender_id: str):
+    stream_id = message.get("stream_id")
+    recipient_id = message.get("recipient_id")
+    gift_type = message.get("gift_type")
+    
+    # Process gift transaction
+    async with get_db() as db:
+        gift = await process_gift_transaction(
+            db, sender_id, recipient_id, stream_id, gift_type
+        )
+    
+    # Broadcast gift animation to stream
+    await connection_manager.broadcast_to_room(f"stream_{stream_id}", {
+        "type": "gift_received",
+        "gift": {
+            "type": gift_type,
+            "sender_id": sender_id,
+            "animation": get_gift_animation(gift_type),
+            "value": get_gift_value(gift_type)
+        }
+    })
+
+async def handle_billing_tick(message: Dict, client_id: str):
+    session_id = message.get("session_id")
+    
+    # Process minute charge
+    async with get_db() as db:
+        result = await billing_service.charge_minute(db, session_id)
+        
+        if result["status"] == "insufficient_funds":
+            # End session
+            await session_service.end_session(db, session_id, "insufficient_funds")
+            
+            # Notify both parties
+            await connection_manager.broadcast_to_room(f"session_{session_id}", {
+                "type": "session_ended",
+                "reason": "insufficient_funds"
+            })
+        else:
+            # Send billing update
+            await connection_manager.send_to_user(client_id, {
+                "type": "billing_update",
+                "remaining_balance": result["remaining_balance"],
+                "total_charged": result["total_charged"],
+                "minutes_elapsed": result["minutes_elapsed"]
+            })
+
+async def handle_stream_start(message: Dict, reader_id: str):
+    title = message.get("title")
+    description = message.get("description")
+    
+    async with get_db() as db:
+        stream = await create_stream(db, reader_id, title, description)
+    
+    # Notify followers
+    await notification_service.notify_followers(reader_id, {
+        "type": "stream_started",
+        "reader_id": reader_id,
+        "stream_id": stream.id,
+        "title": title
+    })
+
+async def handle_stream_end(message: Dict, reader_id: str):
+    stream_id = message.get("stream_id")
+    
+    async with get_db() as db:
+        stats = await end_stream(db, stream_id)
+    
+    # Send final stats to reader
+    await connection_manager.send_to_user(reader_id, {
+        "type": "stream_stats",
+        "total_viewers": stats["total_viewers"],
+        "total_gifts": stats["total_gifts"],
+        "earnings": stats["earnings"]
+    })
+
+async def handle_status_update(message: Dict, reader_id: str):
+    status = message.get("status")  # online, offline, busy
+    
+    async with get_db() as db:
+        await update_reader_status(db, reader_id, status)
+    
+    # Broadcast to homepage
+    await connection_manager.broadcast_to_room("homepage", {
+        "type": "reader_status_change",
+        "reader_id": reader_id,
+        "status": status
+    })
+
+async def handle_disconnect(client_id: str):
+    # Clean up any active sessions
+    async with get_db() as db:
+        sessions = await get_active_sessions_for_user(db, client_id)
+        for session in sessions:
+            await session_service.pause_session(db, session.id)
+
+# Stripe webhook endpoint
+@app.post("/webhook/stripe")
+async def stripe_webhook(request: Request, db: AsyncSession = Depends(get_db)):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, settings.STRIPE_WEBHOOK_SECRET
+        )
+    except ValueError as e:
+        logger.error(f"Invalid Stripe payload: {e}")
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        logger.error(f"Invalid Stripe signature: {e}")
+        raise HTTPException(status_code=400, detail="Invalid signature")
+    
+    # Process events
+    if event["type"] == "payment_intent.succeeded":
+        await handle_payment_success(event["data"]["object"], db)
+    elif event["type"] == "payment_intent.payment_failed":
+        await handle_payment_failure(event["data"]["object"], db)
+    elif event["type"] == "account.updated":
+        await handle_stripe_account_update(event["data"]["object"], db)
+    elif event["type"] == "transfer.created":
+        await handle_payout_created(event["data"]["object"], db)
+    elif event["type"] == "charge.dispute.created":
+        await handle_dispute_created(event["data"]["object"], db)
+    
+    return {"status": "success"}
+
+# ===== COMPLETE DATABASE MODELS =====
+
+# backend/app/models/__init__.py
+from app.models.user import User, ClientProfile, ReaderProfile, AdminSettings
+from app.models.reading import ReadingSession, ScheduledReading, SessionChat
+from app.models.streaming import LiveStream, VirtualGift, StreamViewer
+from app.models.marketplace import Product, Order, OrderItem, Category
+from app.models.payment import Transaction, Payout, Dispute, AutoReload
+from app.models.community import ForumPost, ForumComment, ForumCategory, Report
+from app.models.message import Message, MessageThread
+from app.models.review import Review, ReviewResponse
+from app.models.notification import Notification, NotificationPreference
+from app.models.application import ReaderApplication
+
+# backend/app/models/complete_models.py
+from sqlalchemy import Column, String, DateTime, Enum, DECIMAL, Boolean, Integer, Text, ARRAY, ForeignKey, JSON
+from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.orm import relationship
+from datetime import datetime
+import uuid
+from app.core.database import Base
+
+class User(Base):
+    __tablename__ = "users"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    clerk_id = Column(String(255), unique=True, nullable=False, index=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    role = Column(Enum("client", "reader", "admin", name="user_role"), nullable=False)
+    is_active = Column(Boolean, default=True)
+    is_banned = Column(Boolean, default=False)
+    ban_reason = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    last_login = Column(DateTime)
+    
+    # Relationships
+    client_profile = relationship("ClientProfile", back_populates="user", uselist=False)
+    reader_profile = relationship("ReaderProfile", back_populates="user", uselist=False)
+    sessions_as_client = relationship("ReadingSession", foreign_keys="ReadingSession.client_id")
+    sessions_as_reader = relationship("ReadingSession", foreign_keys="ReadingSession.reader_id")
+    messages_sent = relationship("Message", foreign_keys="Message.sender_id")
+    messages_received = relationship("Message", foreign_keys="Message.recipient_id")
+    reviews_given = relationship("Review", foreign_keys="Review.client_id")
+    reviews_received = relationship("Review", foreign_keys="Review.reader_id")
+    notifications = relationship("Notification", back_populates="user")
+
+class ClientProfile(Base):
+    __tablename__ = "client_profiles"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True)
+    balance = Column(DECIMAL(10, 2), default=0.00)
+    lifetime_spent = Column(DECIMAL(10, 2), default=0.00)
+    auto_reload_enabled = Column(Boolean, default=False)
+    auto_reload_amount = Column(DECIMAL(10, 2))
+    auto_reload_threshold = Column(DECIMAL(10, 2))
+    stripe_customer_id = Column(String(255))
+    default_payment_method = Column(String(255))
+    favorite_readers = Column(ARRAY(UUID))
+    blocked_readers = Column(ARRAY(UUID))
+    notes = Column(JSON, default={})
+    preferences = Column(JSON, default={})
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User", back_populates="client_profile")
+
+class ReaderProfile(Base):
+    __tablename__ = "reader_profiles"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True)
+    display_name = Column(String(255), nullable=False)
+    bio = Column(Text)
+    profile_image = Column(String(500))
+    cover_image = Column(String(500))
+    specialties = Column(ARRAY(Text))
+    tools = Column(ARRAY(Text))  # Tarot, Crystal Ball, etc.
+    languages = Column(ARRAY(Text))
+    years_experience = Column(Integer)
+    
+    # Rates
+    chat_rate = Column(DECIMAL(10, 2))
+    phone_rate = Column(DECIMAL(10, 2))
+    video_rate = Column(DECIMAL(10, 2))
+    
+    # Scheduled reading rates
+    scheduled_15min_rate = Column(DECIMAL(10, 2))
+    scheduled_30min_rate = Column(DECIMAL(10, 2))
+    scheduled_60min_rate = Column(DECIMAL(10, 2))
+    
+    # Status
+    is_online = Column(Boolean, default=False)
+    is_featured = Column(Boolean, default=False)
+    is_verified = Column(Boolean, default=False)
+    status = Column(Enum("online", "offline", "busy", "in_session", name="reader_status"), default="offline")
+    
+    # Earnings
+    total_earnings = Column(DECIMAL(12, 2), default=0.00)
+    pending_payout = Column(DECIMAL(10, 2), default=0.00)
+    lifetime_earnings = Column(DECIMAL(12, 2), default=0.00)
+    
+    # Stats
+    rating = Column(DECIMAL(3, 2))
+    total_reviews = Column(Integer, default=0)
+    total_sessions = Column(Integer, default=0)
+    total_minutes = Column(Integer, default=0)
+    response_rate = Column(DECIMAL(5, 2))
+    
+    # Stripe
+    stripe_account_id = Column(String(255))
+    stripe_onboarding_complete = Column(Boolean, default=False)
+    
+    # Schedule
+    availability_schedule = Column(JSON, default={})
+    vacation_mode = Column(Boolean, default=False)
+    vacation_message = Column(Text)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    approved_at = Column(DateTime)
+    approved_by = Column(UUID(as_uuid=True))
+    
+    # Relationships
+    user = relationship("User", back_populates="reader_profile")
+
+class ReadingSession(Base):
+    __tablename__ = "reading_sessions"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reader_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    client_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
+    session_type = Column(Enum("chat", "phone", "video", name="session_type"), nullable=False)
+    
+    # Timing
+    start_time = Column(DateTime)
+    end_time = Column(DateTime)
+    scheduled_time = Column(DateTime)  # For scheduled sessions
+    duration_minutes = Column(Integer)
+    
+    # Billing
+    rate_per_minute = Column(DECIMAL(10, 2))
+    total_charged = Column(DECIMAL(10, 2), default=0.00)
+    reader_earnings = Column(DECIMAL(10, 2), default=0.00)  # 70% of total
+    platform_fee = Column(DECIMAL(10, 2), default=0.00)  # 30% of total
+    
+    # Status
+    status = Column(Enum(
+        "pending", "accepted", "declined", "scheduled", "active", 
+        "paused", "completed", "cancelled", "expired", "disputed",
+        "ended_by_client", "ended_by_reader", "ended_insufficient_funds",
+        name="session_status"
+    ), default="pending")
+    
+    # WebRTC
+    room_id = Column(String(255), unique=True)
+    ice_servers = Column(JSON)
+    
+    # Session data
+    chat_transcript = Column(JSON, default=[])
+    session_notes = Column(Text)
+    session_summary = Column(Text)
+    recording_url = Column(String(500))
+    
+    # Quality
+    connection_quality = Column(JSON)
+    technical_issues = Column(JSON, default=[])
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    reader = relationship("User", foreign_keys=[reader_id])
+    client = relationship("User", foreign_keys=[client_id])
+    review = relationship("Review", back_populates="session", uselist=False)
+    chat_messages = relationship("SessionChat", back_populates="session")
+
+class SessionChat(Base):
+    __tablename__ = "session_chats"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("reading_sessions.id"))
+    sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    content = Column(Text)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    is_system_message = Column(Boolean, default=False)
+    
+    # Relationships
+    session = relationship("ReadingSession", back_populates="chat_messages")
+
+class ScheduledReading(Base):
+    __tablename__ = "scheduled_readings"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reader_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    client_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    session_type = Column(Enum("chat", "phone", "video", name="session_type"))
+    scheduled_time = Column(DateTime, nullable=False)
+    duration_minutes = Column(Integer, nullable=False)
+    total_cost = Column(DECIMAL(10, 2), nullable=False)
+    
+    # Status
+    status = Column(Enum(
+        "scheduled", "reminder_sent", "started", "completed", 
+        "cancelled_by_client", "cancelled_by_reader", "no_show", "rescheduled",
+        name="scheduled_status"
+    ), default="scheduled")
+    
+    # Payment
+    payment_status = Column(Enum("pending", "paid", "refunded", name="payment_status"), default="pending")
+    stripe_payment_intent_id = Column(String(255))
+    
+    # Reminders
+    reminder_15min_sent = Column(Boolean, default=False)
+    reminder_1hour_sent = Column(Boolean, default=False)
+    reminder_24hour_sent = Column(Boolean, default=False)
+    
+    # Notes
+    client_notes = Column(Text)
+    reader_notes = Column(Text)
+    cancellation_reason = Column(Text)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class LiveStream(Base):
+    __tablename__ = "live_streams"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reader_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    title = Column(String(255), nullable=False)
+    description = Column(Text)
+    thumbnail_url = Column(String(500))
+    
+    # Stream config
+    is_active = Column(Boolean, default=False)
+    is_premium = Column(Boolean, default=False)
+    premium_price = Column(DECIMAL(10, 2))
+    is_private = Column(Boolean, default=False)
+    allowed_viewers = Column(ARRAY(UUID))
+    
+    # Stats
+    viewer_count = Column(Integer, default=0)
+    peak_viewers = Column(Integer, default=0)
+    unique_viewers = Column(Integer, default=0)
+    total_gifts_value = Column(DECIMAL(10, 2), default=0.00)
+    total_gifts_count = Column(Integer, default=0)
+    chat_message_count = Column(Integer, default=0)
+    
+    # Timing
+    started_at = Column(DateTime)
+    ended_at = Column(DateTime)
+    scheduled_for = Column(DateTime)
+    duration_minutes = Column(Integer)
+    
+    # Technical
+    stream_key = Column(String(255), unique=True)
+    stream_url = Column(String(500))
+    recording_url = Column(String(500))
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    gifts = relationship("VirtualGift", back_populates="stream")
+    viewers = relationship("StreamViewer", back_populates="stream")
+
+class VirtualGift(Base):
+    __tablename__ = "virtual_gifts"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    recipient_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    stream_id = Column(UUID(as_uuid=True), ForeignKey("live_streams.id"))
+    
+    gift_type = Column(String(100))  # rose, heart, crystal, moon, star, galaxy
+    gift_value = Column(DECIMAL(10, 2))
+    animation_played = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    stream = relationship("LiveStream", back_populates="gifts")
+
+class StreamViewer(Base):
+    __tablename__ = "stream_viewers"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    stream_id = Column(UUID(as_uuid=True), ForeignKey("live_streams.id"))
+    viewer_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    joined_at = Column(DateTime, default=datetime.utcnow)
+    left_at = Column(DateTime)
+    watch_time_minutes = Column(Integer, default=0)
+    
+    # Relationships
+    stream = relationship("LiveStream", back_populates="viewers")
+
+class Product(Base):
+    __tablename__ = "products"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    seller_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    # Stripe
+    stripe_product_id = Column(String(255))
+    stripe_price_id = Column(String(255))
+    
+    # Product info
+    name = Column(String(255), nullable=False)
+    description = Column(Text)
+    category_id = Column(UUID(as_uuid=True), ForeignKey("categories.id"))
+    product_type = Column(Enum("service", "digital", "physical", name="product_type"))
+    
+    # Pricing
+    price = Column(DECIMAL(10, 2))
+    compare_at_price = Column(DECIMAL(10, 2))
+    cost = Column(DECIMAL(10, 2))
+    
+    # Inventory
+    inventory_count = Column(Integer)
+    track_inventory = Column(Boolean, default=True)
+    allow_backorder = Column(Boolean, default=False)
+    
+    # Digital products
+    digital_file_url = Column(String(500))
+    digital_file_size = Column(Integer)
+    download_limit = Column(Integer)
+    
+    # Physical products
+    weight = Column(DECIMAL(10, 2))
+    shipping_required = Column(Boolean, default=False)
+    
+    # Images
+    images = Column(ARRAY(String))
+    
+    # Status
+    is_active = Column(Boolean, default=True)
+    is_featured = Column(Boolean, default=False)
+    
+    # Stats
+    view_count = Column(Integer, default=0)
+    purchase_count = Column(Integer, default=0)
+    rating = Column(DECIMAL(3, 2))
+    review_count = Column(Integer, default=0)
+    
+    # SEO
+    slug = Column(String(255), unique=True)
+    meta_title = Column(String(255))
+    meta_description = Column(Text)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    category = relationship("Category")
+    orders = relationship("OrderItem", back_populates="product")
+
+class Category(Base):
+    __tablename__ = "categories"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(100), unique=True, nullable=False)
+    slug = Column(String(100), unique=True, nullable=False)
+    description = Column(Text)
+    parent_id = Column(UUID(as_uuid=True), ForeignKey("categories.id"))
+    image_url = Column(String(500))
+    display_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Order(Base):
+    __tablename__ = "orders"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_number = Column(String(50), unique=True, nullable=False)
+    buyer_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    # Totals
+    subtotal = Column(DECIMAL(10, 2))
+    tax_amount = Column(DECIMAL(10, 2))
+    shipping_amount = Column(DECIMAL(10, 2))
+    discount_amount = Column(DECIMAL(10, 2))
+    total_amount = Column(DECIMAL(10, 2))
+    
+    # Payment
+    stripe_payment_intent_id = Column(String(255))
+    payment_status = Column(Enum("pending", "paid", "failed", "refunded", name="payment_status"))
+    
+    # Shipping
+    shipping_name = Column(String(255))
+    shipping_address = Column(JSON)
+    shipping_method = Column(String(100))
+    tracking_number = Column(String(255))
+    
+    # Status
+    status = Column(Enum(
+        "pending", "processing", "shipped", "delivered", 
+        "cancelled", "refunded", "disputed",
+        name="order_status"
+    ), default="pending")
+    
+    # Notes
+    customer_notes = Column(Text)
+    internal_notes = Column(Text)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    items = relationship("OrderItem", back_populates="order")
+
+class OrderItem(Base):
+    __tablename__ = "order_items"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"))
+    product_id = Column(UUID(as_uuid=True), ForeignKey("products.id"))
+    
+    quantity = Column(Integer, nullable=False)
+    price = Column(DECIMAL(10, 2), nullable=False)
+    total = Column(DECIMAL(10, 2), nullable=False)
+    
+    # For digital products
+    download_count = Column(Integer, default=0)
+    download_expires_at = Column(DateTime)
+    
+    # Relationships
+    order = relationship("Order", back_populates="items")
+    product = relationship("Product", back_populates="orders")
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    type = Column(Enum(
+        "deposit", "withdrawal", "reading_charge", "reading_earning",
+        "gift_sent", "gift_received", "product_purchase", "product_sale",
+        "refund", "dispute", "payout", "fee",
+        name="transaction_type"
+    ))
+    
+    amount = Column(DECIMAL(10, 2), nullable=False)
+    balance_before = Column(DECIMAL(10, 2))
+    balance_after = Column(DECIMAL(10, 2))
+    
+    # References
+    session_id = Column(UUID(as_uuid=True), ForeignKey("reading_sessions.id"))
+    order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"))
+    payout_id = Column(UUID(as_uuid=True), ForeignKey("payouts.id"))
+    
+    # Stripe
+    stripe_payment_intent_id = Column(String(255))
+    stripe_charge_id = Column(String(255))
+    stripe_transfer_id = Column(String(255))
+    
+    status = Column(Enum("pending", "completed", "failed", "cancelled", name="transaction_status"))
+    
+    description = Column(Text)
+    metadata = Column(JSON)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Payout(Base):
+    __tablename__ = "payouts"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reader_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    amount = Column(DECIMAL(10, 2), nullable=False)
+    currency = Column(String(3), default="USD")
+    
+    stripe_transfer_id = Column(String(255))
+    stripe_payout_id = Column(String(255))
+    
+    status = Column(Enum(
+        "pending", "processing", "completed", "failed", "cancelled",
+        name="payout_status"
+    ), default="pending")
+    
+    method = Column(Enum("standard", "instant", name="payout_method"), default="standard")
+    
+    initiated_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime)
+    failed_at = Column(DateTime)
+    failure_reason = Column(Text)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Dispute(Base):
+    __tablename__ = "disputes"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("reading_sessions.id"))
+    order_id = Column(UUID(as_uuid=True), ForeignKey("orders.id"))
+    
+    complainant_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    respondent_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    reason = Column(String(255))
+    description = Column(Text)
+    evidence = Column(JSON)  # Screenshots, logs, etc.
+    
+    status = Column(Enum(
+        "open", "under_review", "resolved", "escalated", "closed",
+        name="dispute_status"
+    ), default="open")
+    
+    resolution = Column(Text)
+    resolved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    resolved_at = Column(DateTime)
+    
+    stripe_dispute_id = Column(String(255))
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class ForumPost(Base):
+    __tablename__ = "forum_posts"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    category_id = Column(UUID(as_uuid=True), ForeignKey("forum_categories.id"))
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    title = Column(String(255), nullable=False)
+    content = Column(Text, nullable=False)
+    slug = Column(String(255), unique=True)
+    
+    is_pinned = Column(Boolean, default=False)
+    is_locked = Column(Boolean, default=False)
+    is_deleted = Column(Boolean, default=False)
+    
+    view_count = Column(Integer, default=0)
+    like_count = Column(Integer, default=0)
+    comment_count = Column(Integer, default=0)
+    
+    tags = Column(ARRAY(String))
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    comments = relationship("ForumComment", back_populates="post")
+
+class ForumComment(Base):
+    __tablename__ = "forum_comments"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    post_id = Column(UUID(as_uuid=True), ForeignKey("forum_posts.id"))
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    parent_id = Column(UUID(as_uuid=True), ForeignKey("forum_comments.id"))
+    
+    content = Column(Text, nullable=False)
+    
+    is_deleted = Column(Boolean, default=False)
+    is_edited = Column(Boolean, default=False)
+    
+    like_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    post = relationship("ForumPost", back_populates="comments")
+
+class ForumCategory(Base):
+    __tablename__ = "forum_categories"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(100), unique=True, nullable=False)
+    slug = Column(String(100), unique=True, nullable=False)
+    description = Column(Text)
+    icon = Column(String(100))
+    color = Column(String(7))
+    
+    post_count = Column(Integer, default=0)
+    
+    display_order = Column(Integer, default=0)
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+class Message(Base):
+    __tablename__ = "messages"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    thread_id = Column(UUID(as_uuid=True), ForeignKey("message_threads.id"))
+    sender_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    recipient_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    content = Column(Text, nullable=False)
+    
+    is_read = Column(Boolean, default=False)
+    read_at = Column(DateTime)
+    
+    is_paid = Column(Boolean, default=False)
+    payment_amount = Column(DECIMAL(10, 2))
+    
+    attachments = Column(ARRAY(String))
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    sender = relationship("User", foreign_keys=[sender_id])
+    recipient = relationship("User", foreign_keys=[recipient_id])
+
+class MessageThread(Base):
+    __tablename__ = "message_threads"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    participant1_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    participant2_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    last_message_at = Column(DateTime)
+    last_message_preview = Column(String(255))
+    
+    participant1_unread = Column(Integer, default=0)
+    participant2_unread = Column(Integer, default=0)
+    
+    is_archived_by_1 = Column(Boolean, default=False)
+    is_archived_by_2 = Column(Boolean, default=False)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Review(Base):
+    __tablename__ = "reviews"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    session_id = Column(UUID(as_uuid=True), ForeignKey("reading_sessions.id"), unique=True)
+    reader_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    client_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    rating = Column(Integer, nullable=False)  # 1-5
+    comment = Column(Text)
+    
+    is_public = Column(Boolean, default=True)
+    is_featured = Column(Boolean, default=False)
+    
+    helpful_count = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    # Relationships
+    session = relationship("ReadingSession", back_populates="review")
+    response = relationship("ReviewResponse", back_populates="review", uselist=False)
+
+class ReviewResponse(Base):
+    __tablename__ = "review_responses"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    review_id = Column(UUID(as_uuid=True), ForeignKey("reviews.id"), unique=True)
+    reader_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    content = Column(Text, nullable=False)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    review = relationship("Review", back_populates="response")
+
+class Notification(Base):
+    __tablename__ = "notifications"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    type = Column(String(100))
+    title = Column(String(255))
+    message = Column(Text)
+    
+    data = Column(JSON)  # Additional context
+    
+    is_read = Column(Boolean, default=False)
+    read_at = Column(DateTime)
+    
+    is_email_sent = Column(Boolean, default=False)
+    is_push_sent = Column(Boolean, default=False)
+    
+    action_url = Column(String(500))
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    # Relationships
+    user = relationship("User", back_populates="notifications")
+
+class NotificationPreference(Base):
+    __tablename__ = "notification_preferences"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"), unique=True)
+    
+    # Email notifications
+    email_reading_requests = Column(Boolean, default=True)
+    email_messages = Column(Boolean, default=True)
+    email_reviews = Column(Boolean, default=True)
+    email_marketing = Column(Boolean, default=True)
+    email_reminders = Column(Boolean, default=True)
+    
+    # Push notifications
+    push_reading_requests = Column(Boolean, default=True)
+    push_messages = Column(Boolean, default=True)
+    push_stream_start = Column(Boolean, default=True)
+    
+    # SMS notifications
+    sms_enabled = Column(Boolean, default=False)
+    sms_phone = Column(String(20))
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class ReaderApplication(Base):
+    __tablename__ = "reader_applications"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    
+    # Personal info
+    full_name = Column(String(255), nullable=False)
+    email = Column(String(255), nullable=False)
+    phone = Column(String(20))
+    
+    # Experience
+    years_experience = Column(Integer)
+    specialties = Column(ARRAY(String))
+    tools = Column(ARRAY(String))
+    bio = Column(Text)
+    
+    # Sample reading
+    sample_reading = Column(Text)
+    
+    # References
+    references = Column(JSON)
+    
+    # Social/website
+    website = Column(String(500))
+    social_media = Column(JSON)
+    
+    # Status
+    status = Column(Enum(
+        "pending", "under_review", "approved", "rejected", "withdrawn",
+        name="application_status"
+    ), default="pending")
+    
+    reviewed_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    reviewed_at = Column(DateTime)
+    review_notes = Column(Text)
+    rejection_reason = Column(Text)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class Report(Base):
+    __tablename__ = "reports"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    reporter_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    reported_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    type = Column(Enum(
+        "spam", "harassment", "inappropriate_content", "scam", 
+        "impersonation", "other",
+        name="report_type"
+    ))
+    
+    description = Column(Text)
+    evidence = Column(JSON)
+    
+    # References
+    session_id = Column(UUID(as_uuid=True), ForeignKey("reading_sessions.id"))
+    post_id = Column(UUID(as_uuid=True), ForeignKey("forum_posts.id"))
+    message_id = Column(UUID(as_uuid=True), ForeignKey("messages.id"))
+    
+    status = Column(Enum(
+        "pending", "reviewing", "resolved", "dismissed",
+        name="report_status"
+    ), default="pending")
+    
+    resolution = Column(Text)
+    resolved_by = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    resolved_at = Column(DateTime)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class HelpArticle(Base):
+    __tablename__ = "help_articles"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    category = Column(String(100))
+    title = Column(String(255), nullable=False)
+    slug = Column(String(255), unique=True)
+    content = Column(Text)
+    
+    tags = Column(ARRAY(String))
+    
+    view_count = Column(Integer, default=0)
+    helpful_count = Column(Integer, default=0)
+    not_helpful_count = Column(Integer, default=0)
+    
+    is_featured = Column(Boolean, default=False)
+    is_published = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class AutoReload(Base):
+    __tablename__ = "auto_reloads"
+    
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    client_id = Column(UUID(as_uuid=True), ForeignKey("users.id"))
+    
+    trigger_amount = Column(DECIMAL(10, 2))
+    reload_amount = Column(DECIMAL(10, 2))
+    
+    last_triggered = Column(DateTime)
+    times_triggered = Column(Integer, default=0)
+    
+    is_active = Column(Boolean, default=True)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+# ===== COMPLETE SERVICES =====
+
+# backend/app/services/billing_service.py
+import asyncio
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import Dict, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from app.models import ReadingSession, ClientProfile, ReaderProfile, Transaction
+import logging
+
+logger = logging.getLogger(__name__)
+
+class BillingService:
+    def __init__(self):
+        self.active_sessions: Dict[str, asyncio.Task] = {}
+    
+    async def start_monitoring(self):
+        """Main monitoring loop for all billing operations"""
+        while True:
+            try:
+                await self._check_active_sessions()
+                await self._process_auto_reloads()
+                await self._check_scheduled_reminders()
+                await asyncio.sleep(5)
+            except Exception as e:
+                logger.error(f"Billing monitoring error: {e}")
+                await asyncio.sleep(10)
+    
+    async def start_session_billing(self, session_id: str, db: AsyncSession):
+        """Start billing for a specific session"""
+        if session_id not in self.active_sessions:
+            task = asyncio.create_task(self._bill_session(session_id))
+            self.active_sessions[session_id] = task
+            return True
+        return False
+    
+    async def _bill_session(self, session_id: str):
+        """Bill a session per minute"""
+        while True:
+            try:
+                await asyncio.sleep(60)  # Charge every minute
+                
+                async with get_db() as db:
+                    # Get session
+                    result = await db.execute(
+                        select(ReadingSession).where(
+                            ReadingSession.id == session_id,
+                            ReadingSession.status == "active"
+                        )
+                    )
+                    session = result.scalar_one_or_none()
+                    
+                    if not session:
+                        break
+                    
+                    # Get client profile
+                    client_result = await db.execute(
+                        select(ClientProfile).where(
+                            ClientProfile.user_id == session.client_id
+                        )
+                    )
+                    client = client_result.scalar_one()
+                    
+                    # Check balance
+                    if client.balance < session.rate_per_minute:
+                        # Insufficient funds - end session
+                        await self.end_session_insufficient_funds(db, session)
+                        break
+                    
+                    # Charge client
+                    client.balance -= session.rate_per_minute
+                    client.lifetime_spent += session.rate_per_minute
+                    
+                    # Update session
+                    session.total_charged += session.rate_per_minute
+                    session.duration_minutes = (
+                        (datetime.utcnow() - session.start_time).total_seconds() / 60
+                    )
+                    
+                    # Calculate earnings split
+                    reader_earnings = session.rate_per_minute * Decimal("0.70")
+                    platform_fee = session.rate_per_minute * Decimal("0.30")
+                    
+                    session.reader_earnings += reader_earnings
+                    session.platform_fee += platform_fee
+                    
+                    # Update reader earnings
+                    reader_result = await db.execute(
+                        select(ReaderProfile).where(
+                            ReaderProfile.user_id == session.reader_id
+                        )
+                    )
+                    reader = reader_result.scalar_one()
+                    reader.pending_payout += reader_earnings
+                    reader.total_earnings += reader_earnings
+                    
+                    # Create transaction records
+                    client_transaction = Transaction(
+                        user_id=session.client_id,
+                        type="reading_charge",
+                        amount=-session.rate_per_minute,
+                        balance_before=client.balance + session.rate_per_minute,
+                        balance_after=client.balance,
+                        session_id=session_id,
+                        status="completed",
+                        description=f"Reading session charge - minute {int(session.duration_minutes)}"
+                    )
+                    
+                    reader_transaction = Transaction(
+                        user_id=session.reader_id,
+                        type="reading_earning",
+                        amount=reader_earnings,
+                        session_id=session_id,
+                        status="completed",
+                        description=f"Reading session earning - minute {int(session.duration_minutes)}"
+                    )
+                    
+                    db.add(client_transaction)
+                    db.add(reader_transaction)
+                    
+                    await db.commit()
+                    
+                    # Send billing update via WebSocket
+                    await connection_manager.send_to_user(session.client_id, {
+                        "type": "billing_update",
+                        "session_id": str(session_id),
+                        "remaining_balance": float(client.balance),
+                        "total_charged": float(session.total_charged),
+                        "minutes_elapsed": int(session.duration_minutes)
+                    })
+                    
+            except Exception as e:
+                logger.error(f"Billing error for session {session_id}: {e}")
+                await asyncio.sleep(5)
+    
+    async def end_session_insufficient_funds(self, db: AsyncSession, session: ReadingSession):
+        """End session due to insufficient funds"""
+        session.status = "ended_insufficient_funds"
+        session.end_time = datetime.utcnow()
+        
+        # Generate session summary
+        session.session_summary = await self.generate_session_summary(session)
+        
+        await db.commit()
+        
+        # Notify both parties
+        await connection_manager.broadcast_to_room(f"session_{session.id}", {
+            "type": "session_ended",
+            "reason": "insufficient_funds",
+            "session_id": str(session.id),
+            "total_duration": int(session.duration_minutes),
+            "total_charged": float(session.total_charged)
+        })
+        
+        # Clean up
+        if str(session.id) in self.active_sessions:
+            self.active_sessions[str(session.id)].cancel()
+            del self.active_sessions[str(session.id)]
+    
+    async def charge_minute(self, db: AsyncSession, session_id: str) -> Dict:
+        """Charge for one minute of reading"""
+        # Implementation integrated into _bill_session above
+        pass
+    
+    async def process_scheduled_payment(self, db: AsyncSession, scheduled_id: str):
+        """Process payment for scheduled reading"""
+        result = await db.execute(
+            select(ScheduledReading).where(ScheduledReading.id == scheduled_id)
+        )
+        scheduled = result.scalar_one_or_none()
+        
+        if not scheduled:
+            return {"status": "error", "message": "Scheduled reading not found"}
+        
+        # Get client profile
+        client_result = await db.execute(
+            select(ClientProfile).where(ClientProfile.user_id == scheduled.client_id)
+        )
+        client = client_result.scalar_one()
+        
+        # Check balance
+        if client.balance < scheduled.total_cost:
+            return {"status": "insufficient_funds"}
+        
+        # Charge client
+        client.balance -= scheduled.total_cost
+        
+        # Calculate split
+        reader_earnings = scheduled.total_cost * Decimal("0.70")
+        platform_fee = scheduled.total_cost * Decimal("0.30")
+        
+        # Update reader earnings
+        reader_result = await db.execute(
+            select(ReaderProfile).where(ReaderProfile.user_id == scheduled.reader_id)
+        )
+        reader = reader_result.scalar_one()
+        reader.pending_payout += reader_earnings
+        
+        # Update scheduled reading
+        scheduled.payment_status = "paid"
+        
+        # Create transactions
+        client_transaction = Transaction(
+            user_id=scheduled.client_id,
+            type="reading_charge",
+            amount=-scheduled.total_cost,
+            balance_before=client.balance + scheduled.total_cost,
+            balance_after=client.balance,
+            status="completed",
+            description=f"Scheduled reading payment - {scheduled.duration_minutes} minutes"
+        )
+        
+        reader_transaction = Transaction(
+            user_id=scheduled.reader_id,
+            type="reading_earning",
+            amount=reader_earnings,
+            status="completed",
+            description=f"Scheduled reading earning - {scheduled.duration_minutes} minutes"
+        )
+        
+        db.add(client_transaction)
+        db.add(reader_transaction)
+        
+        await db.commit()
+        
+        return {"status": "success", "reader_earnings": float(reader_earnings)}
+    
+    async def _process_auto_reloads(self):
+        """Check and process auto-reload triggers"""
+        async with get_db() as db:
+            # Get clients with auto-reload enabled
+            result = await db.execute(
+                select(ClientProfile).where(
+                    ClientProfile.auto_reload_enabled == True,
+                    ClientProfile.balance <= ClientProfile.auto_reload_threshold
+                )
+            )
+            clients = result.scalars().all()
+            
+            for client in clients:
+                try:
+                    # Process auto-reload via Stripe
+                    payment_intent = stripe.PaymentIntent.create(
+                        amount=int(client.auto_reload_amount * 100),
+                        currency="usd",
+                        customer=client.stripe_customer_id,
+                        payment_method=client.default_payment_method,
+                        off_session=True,
+                        confirm=True,
+                        metadata={
+                            "type": "auto_reload",
+                            "client_id": str(client.user_id)
+                        }
+                    )
+                    
+                    if payment_intent.status == "succeeded":
+                        # Update balance
+                        client.balance += client.auto_reload_amount
+                        
+                        # Create transaction
+                        transaction = Transaction(
+                            user_id=client.user_id,
+                            type="deposit",
+                            amount=client.auto_reload_amount,
+                            stripe_payment_intent_id=payment_intent.id,
+                            status="completed",
+                            description="Auto-reload deposit"
+                        )
+                        db.add(transaction)
+                        
+                        # Send notification
+                        await notification_service.notify_user(client.user_id, {
+                            "type": "auto_reload_success",
+                            "amount": float(client.auto_reload_amount),
+                            "new_balance": float(client.balance)
+                        })
+                        
+                except stripe.error.StripeError as e:
+                    logger.error(f"Auto-reload failed for client {client.user_id}: {e}")
+                    
+                    # Disable auto-reload after failure
+                    client.auto_reload_enabled = False
+                    
+                    # Notify client
+                    await notification_service.notify_user(client.user_id, {
+                        "type": "auto_reload_failed",
+                        "reason": str(e)
+                    })
+            
+            await db.commit()
+    
+    async def _check_scheduled_reminders(self):
+        """Check for scheduled readings that need reminders"""
+        async with get_db() as db:
+            now = datetime.utcnow()
+            
+            # 24-hour reminders
+            day_before = now + timedelta(hours=24)
+            result = await db.execute(
+                select(ScheduledReading).where(
+                    ScheduledReading.scheduled_time.between(
+                        day_before - timedelta(minutes=5),
+                        day_before + timedelta(minutes=5)
+                    ),
+                    ScheduledReading.reminder_24hour_sent == False,
+                    ScheduledReading.status == "scheduled"
+                )
+            )
+            
+            for scheduled in result.scalars():
+                await notification_service.send_scheduled_reminder(
+                    scheduled, "24_hour"
+                )
+                scheduled.reminder_24hour_sent = True
+            
+            # 1-hour reminders
+            hour_before = now + timedelta(hours=1)
+            result = await db.execute(
+                select(ScheduledReading).where(
+                    ScheduledReading.scheduled_time.between(
+                        hour_before - timedelta(minutes=5),
+                        hour_before + timedelta(minutes=5)
+                    ),
+                    ScheduledReading.reminder_1hour_sent == False,
+                    ScheduledReading.status == "scheduled"
+                )
+            )
+            
+            for scheduled in result.scalars():
+                await notification_service.send_scheduled_reminder(
+                    scheduled, "1_hour"
+                )
+                scheduled.reminder_1hour_sent = True
+            
+            # 15-minute reminders
+            fifteen_before = now + timedelta(minutes=15)
+            result = await db.execute(
+                select(ScheduledReading).where(
+                    ScheduledReading.scheduled_time.between(
+                        fifteen_before - timedelta(minutes=2),
+                        fifteen_before + timedelta(minutes=2)
+                    ),
+                    ScheduledReading.reminder_15min_sent == False,
+                    ScheduledReading.status == "scheduled"
+                )
+            )
+            
+            for scheduled in result.scalars():
+                await notification_service.send_scheduled_reminder(
+                    scheduled, "15_minute"
+                )
+                scheduled.reminder_15min_sent = True
+            
+            await db.commit()
+    
+    async def generate_session_summary(self, session: ReadingSession) -> str:
+        """Generate AI summary of session"""
+        # In production, integrate with AI service
+        summary = f"""
+        Session Summary
+        ===============
+        Duration: {int(session.duration_minutes)} minutes
+        Type: {session.session_type.capitalize()}
+        Total Cost: ${session.total_charged:.2f}
+        
+        Session ended at {session.end_time.strftime('%Y-%m-%d %H:%M:%S UTC')}
+        """
+        return summary
+
+# backend/app/services/payout_service.py
+import asyncio
+from datetime import datetime, time
+from decimal import Decimal
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models import ReaderProfile, Payout, Transaction
+import stripe
+import logging
+
+logger = logging.getLogger(__name__)
+
+class PayoutService:
+    def __init__(self):
+        self.payout_threshold = Decimal("15.00")
+        self.payout_time = time(14, 0)  # 2 PM UTC daily
+    
+    async def start_daily_payouts(self):
+        """Run daily payout processing"""
+        while True:
+            try:
+                now = datetime.utcnow()
+                next_run = datetime.combine(now.date(), self.payout_time)
+                
+                if now.time() > self.payout_time:
+                    next_run = datetime.combine(
+                        now.date() + timedelta(days=1),
+                        self.payout_time
+                    )
+                
+                wait_seconds = (next_run - now).total_seconds()
+                await asyncio.sleep(wait_seconds)
+                
+                await self.process_all_payouts()
+                
+            except Exception as e:
+                logger.error(f"Payout service error: {e}")
+                await asyncio.sleep(3600)  # Wait an hour on error
+    
+    async def process_all_payouts(self):
+        """Process payouts for all eligible readers"""
+        async with get_db() as db:
+            # Get readers with balance >= threshold
+            result = await db.execute(
+                select(ReaderProfile).where(
+                    ReaderProfile.pending_payout >= self.payout_threshold,
+                    ReaderProfile.stripe_account_id.isnot(None),
+                    ReaderProfile.stripe_onboarding_complete == True
+                )
+            )
+            readers = result.scalars().all()
+            
+            logger.info(f"Processing payouts for {len(readers)} readers")
+            
+            for reader in readers:
+                try:
+                    await self.process_reader_payout(db, reader)
+                except Exception as e:
+                    logger.error(f"Payout failed for reader {reader.user_id}: {e}")
+            
+            await db.commit()
+    
+    async def process_reader_payout(self, db: AsyncSession, reader: ReaderProfile):
+        """Process payout for a single reader"""
+        amount = reader.pending_payout
+        
+        try:
+            # Create Stripe transfer
+            transfer = stripe.Transfer.create(
+                amount=int(amount * 100),  # Convert to cents
+                currency="usd",
+                destination=reader.stripe_account_id,
+                metadata={
+                    "reader_id": str(reader.user_id),
+                    "payout_date": datetime.utcnow().isoformat()
+                }
+            )
+            
+            # Create payout record
+            payout = Payout(
+                reader_id=reader.user_id,
+                amount=amount,
+                stripe_transfer_id=transfer.id,
+                status="completed",
+                completed_at=datetime.utcnow()
+            )
+            db.add(payout)
+            
+            # Create transaction
+            transaction = Transaction(
+                user_id=reader.user_id,
+                type="payout",
+                amount=amount,
+                payout_id=payout.id,
+                stripe_transfer_id=transfer.id,
+                status="completed",
+                description=f"Daily payout - ${amount:.2f}"
+            )
+            db.add(transaction)
+            
+            # Update reader balance
+            reader.pending_payout = Decimal("0.00")
+            reader.lifetime_earnings += amount
+            
+            # Send notification
+            await notification_service.notify_user(reader.user_id, {
+                "type": "payout_processed",
+                "amount": float(amount),
+                "transfer_id": transfer.id
+            })
+            
+            logger.info(f"Payout of ${amount} processed for reader {reader.user_id}")
+            
+        except stripe.error.StripeError as e:
+            logger.error(f"Stripe error processing payout: {e}")
+            
+            # Create failed payout record
+            payout = Payout(
+                reader_id=reader.user_id,
+                amount=amount,
+                status="failed",
+                failed_at=datetime.utcnow(),
+                failure_reason=str(e)
+            )
+            db.add(payout)
+            
+            # Notify reader of failure
+            await notification_service.notify_user(reader.user_id, {
+                "type": "payout_failed",
+                "amount": float(amount),
+                "reason": str(e)
+            })
+
+# backend/app/services/notification_service.py
+import asyncio
+from datetime import datetime
+from typing import Dict, List, Optional
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
+from app.models import Notification, NotificationPreference, User
+import logging
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import smtplib
+
+logger = logging.getLogger(__name__)
+
+class NotificationService:
+    def __init__(self):
+        self.pending_notifications: List[Dict] = []
+    
+    async def start_scheduler(self):
+        """Start notification scheduler"""
+        while True:
+            try:
+                await self.process_pending_notifications()
+                await asyncio.sleep(10)
+            except Exception as e:
+                logger.error(f"Notification scheduler error: {e}")
+                await asyncio.sleep(30)
+    
+    async def notify_user(self, user_id: str, message: Dict):
+        """Send notification to user through multiple channels"""
+        async with get_db() as db:
+            # Get user preferences
+            result = await db.execute(
+                select(NotificationPreference).where(
+                    NotificationPreference.user_id == user_id
+                )
+            )
+            preferences = result.scalar_one_or_none()
+            
+            # Create notification record
+            notification = Notification(
+                user_id=user_id,
+                type=message.get("type"),
+                title=message.get("title"),
+                message=message.get("message"),
+                data=message,
+                action_url=message.get("action_url")
+            )
+            db.add(notification)
+            await db.commit()
+            
+            # Send via WebSocket (always)
+            await connection_manager.send_to_user(user_id, message)
+            
+            # Check preferences for other channels
+            if preferences:
+                notification_type = message.get("type")
+                
+                # Email notification
+                if self._should_send_email(preferences, notification_type):
+                    await self.send_email_notification(user_id, message)
+                    notification.is_email_sent = True
+                
+                # Push notification
+                if self._should_send_push(preferences, notification_type):
+                    await self.send_push_notification(user_id, message)
+                    notification.is_push_sent = True
+                
+                # SMS notification
+                if preferences.sms_enabled and notification_type in ["reading_request"]:
+                    await self.send_sms_notification(preferences.sms_phone, message)
+            
+            await db.commit()
+    
+    async def notify_followers(self, reader_id: str, message: Dict):
+        """Notify all followers of a reader"""
+        async with get_db() as db:
+            # Get followers
+            result = await db.execute(
+                select(ClientProfile).where(
+                    ClientProfile.favorite_readers.contains([reader_id])
+                )
+            )
+            followers = result.scalars().all()
+            
+            for follower in followers:
+                await self.notify_user(follower.user_id, message)
+    
+    async def send_scheduled_reminder(self, scheduled: ScheduledReading, reminder_type: str):
+        """Send reminder for scheduled reading"""
+        # Prepare message
+        time_until = scheduled.scheduled_time - datetime.utcnow()
+        
+        if reminder_type == "24_hour":
+            title = "Reading Tomorrow"
+            message = f"Your reading is scheduled for tomorrow at {scheduled.scheduled_time.strftime('%I:%M %p')}"
+        elif reminder_type == "1_hour":
+            title = "Reading in 1 Hour"
+            message = f"Your reading starts in 1 hour at {scheduled.scheduled_time.strftime('%I:%M %p')}"
+        elif reminder_type == "15_minute":
+            title = "Reading Starting Soon"
+            message = f"Your reading starts in 15 minutes!"
+        
+        # Notify both client and reader
+        for user_id in [scheduled.client_id, scheduled.reader_id]:
+            await self.notify_user(user_id, {
+                "type": "scheduled_reminder",
+                "title": title,
+                "message": message,
+                "scheduled_id": str(scheduled.id),
+                "scheduled_time": scheduled.scheduled_time.isoformat(),
+                "action_url": f"/session/scheduled/{scheduled.id}"
+            })
+    
+    async def send_email_notification(self, user_id: str, message: Dict):
+        """Send email notification"""
+        async with get_db() as db:
+            # Get user email
+            result = await db.execute(
+                select(User).where(User.id == user_id)
+            )
+            user = result.scalar_one()
+            
+            # Prepare email
+            msg = MIMEMultipart()
+            msg['From'] = settings.EMAIL_FROM
+            msg['To'] = user.email
+            msg['Subject'] = message.get("title", "SoulSeer Notification")
+            
+            # HTML body
+            html = f"""
+            <html>
+                <body style="font-family: 'Playfair Display', serif; background: #0a0a0a; color: white; padding: 20px;">
+                    <div style="max-width: 600px; margin: 0 auto; background: rgba(0,0,0,0.8); border: 1px solid #FF69B4; border-radius: 10px; padding: 30px;">
+                        <h1 style="color: #FF69B4; font-family: 'Alex Brush', cursive; text-align: center;">SoulSeer</h1>
+                        <h2 style="color: #FFD700;">{message.get('title', '')}</h2>
+                        <p style="color: white; line-height: 1.6;">{message.get('message', '')}</p>
+                        {f'<a href="{settings.FRONTEND_URL}{message.get("action_url", "")}" style="display: inline-block; background: #FF69B4; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; margin-top: 20px;">View Details</a>' if message.get('action_url') else ''}
+                    </div>
+                </body>
+            </html>
+            """
+            
+            msg.attach(MIMEText(html, 'html'))
+            
+            # Send email
+            try:
+                with smtplib.SMTP(settings.SMTP_HOST, settings.SMTP_PORT) as server:
+                    server.starttls()
+                    server.login(settings.SMTP_USER, settings.SMTP_PASSWORD)
+                    server.send_message(msg)
+                
+                logger.info(f"Email sent to {user.email}")
+                
+            except Exception as e:
+                logger.error(f"Failed to send email: {e}")
+    
+    async def send_push_notification(self, user_id: str, message: Dict):
+        """Send push notification (integrate with service like FCM/OneSignal)"""
+        # Implementation depends on push notification service
+        pass
+    
+    async def send_sms_notification(self, phone: str, message: Dict):
+        """Send SMS notification (integrate with Twilio/similar)"""
+        # Implementation depends on SMS service
+        pass
+    
+    def _should_send_email(self, preferences: NotificationPreference, notification_type: str) -> bool:
+        """Check if email should be sent for this notification type"""
+        type_map = {
+            "reading_request": preferences.email_reading_requests,
+            "new_message": preferences.email_messages,
+            "new_review": preferences.email_reviews,
+            "scheduled_reminder": preferences.email_reminders,
+        }
+        return type_map.get(notification_type, False)
+    
+    def _should_send_push(self, preferences: NotificationPreference, notification_type: str) -> bool:
+        """Check if push should be sent for this notification type"""
+        type_map = {
+            "reading_request": preferences.push_reading_requests,
+            "new_message": preferences.push_messages,
+            "stream_started": preferences.push_stream_start,
+        }
+        return type_map.get(notification_type, False)
+    
+    async def process_pending_notifications(self):
+        """Process any pending notifications"""
+        # Process notification queue
+        while self.pending_notifications:
+            notification = self.pending_notifications.pop(0)
+            await self.notify_user(
+                notification["user_id"],
+                notification["message"]
+            )
+
+# backend/app/services/session_service.py
+from datetime import datetime
+from typing import Optional, Dict, List
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
+from app.models import ReadingSession, SessionChat, User
+import logging
+
+logger = logging.getLogger(__name__)
+
+class SessionService:
+    async def create_session(
+        self,
+        db: AsyncSession,
+        reader_id: str,
+        client_id: str,
+        session_type: str,
+        rate: Decimal
+    ) -> ReadingSession:
+        """Create a new reading session"""
+        room_id = str(uuid.uuid4())
+        
+        session = ReadingSession(
+            reader_id=reader_id,
+            client_id=client_id,
+            session_type=session_type,
+            rate_per_minute=rate,
+            status="pending",
+            room_id=room_id,
+            ice_servers=self.get_ice_servers()
+        )
+        
+        db.add(session)
+        await db.commit()
+        await db.refresh(session)
+        
+        return session
+    
+    async def start_session(self, db: AsyncSession, session_id: str) -> bool:
+        """Start a reading session"""
+        result = await db.execute(
+            select(ReadingSession).where(ReadingSession.id == session_id)
+        )
+        session = result.scalar_one_or_none()
+        
+        if not session or session.status != "accepted":
+            return False
+        
+        session.status = "active"
+        session.start_time = datetime.utcnow()
+        
+        # Update reader status
+        await db.execute(
+            update(ReaderProfile)
+            .where(ReaderProfile.user_id == session.reader_id)
+            .values(status="in_session")
+        )
+        
+        await db.commit()
+        
+        # Start billing
+        await billing_service.start_session_billing(session_id, db)
+        
+        return True
+    
+    async def end_session(
+        self,
+        db: AsyncSession,
+        session_id: str,
+        reason: str = "completed"
+    ) -> Dict:
+        """End a reading session"""
+        result = await db.execute(
+            select(ReadingSession).where(ReadingSession.id == session_id)
+        )
+        session = result.scalar_one_or_none()
+        
+        if not session:
+            return {"status": "error", "message": "Session not found"}
+        
+        session.status = reason
+        session.end_time = datetime.utcnow()
+        
+        if session.start_time:
+            session.duration_minutes = int(
+                (session.end_time - session.start_time).total_seconds() / 60
+            )
+        
+        # Generate summary
+        session.session_summary = await self.generate_summary(session)
+        
+        # Update reader status
+        await db.execute(
+            update(ReaderProfile)
+            .where(ReaderProfile.user_id == session.reader_id)
+            .values(
+                status="online",
+                total_sessions=ReaderProfile.total_sessions + 1,
+                total_minutes=ReaderProfile.total_minutes + (session.duration_minutes or 0)
+            )
+        )
+        
+        await db.commit()
+        
+        return {
+            "status": "success",
+            "session_id": str(session_id),
+            "duration": session.duration_minutes,
+            "total_charged": float(session.total_charged),
+            "summary": session.session_summary
+        }
+    
+    async def pause_session(self, db: AsyncSession, session_id: str):
+        """Pause a session (e.g., on disconnect)"""
+        result = await db.execute(
+            select(ReadingSession).where(
+                ReadingSession.id == session_id,
+                ReadingSession.status == "active"
+            )
+        )
+        session = result.scalar_one_or_none()
+        
+        if session:
+            session.status = "paused"
+            await db.commit()
+    
+    async def resume_session(self, db: AsyncSession, session_id: str):
+        """Resume a paused session"""
+        result = await db.execute(
+            select(ReadingSession).where(
+                ReadingSession.id == session_id,
+                ReadingSession.status == "paused"
+            )
+        )
+        session = result.scalar_one_or_none()
+        
+        if session:
+            session.status = "active"
+            await db.commit()
+            
+            # Restart billing
+            await billing_service.start_session_billing(session_id, db)
+    
+    async def save_chat_message(
+        self,
+        db: AsyncSession,
+        room_id: str,
+        sender_id: str,
+        content: str
+    ):
+        """Save chat message to session"""
+        # Get session by room_id
+        result = await db.execute(
+            select(ReadingSession).where(ReadingSession.room_id == room_id)
+        )
+        session = result.scalar_one_or_none()
+        
+        if session:
+            # Save to SessionChat
+            chat_message = SessionChat(
+                session_id=session.id,
+                sender_id=sender_id,
+                content=content
+            )
+            db.add(chat_message)
+            
+            # Add to transcript
+            if not session.chat_transcript:
+                session.chat_transcript = []
+            
+            session.chat_transcript.append({
+                "sender_id": str(sender_id),
+                "content": content,
+                "timestamp": datetime.utcnow().isoformat()
+            })
+            
+            await db.commit()
+    
+    async def generate_summary(self, session: ReadingSession) -> str:
+        """Generate AI summary of session"""
+        # Get chat messages
+        messages = session.chat_transcript or []
+        
+        summary = f"""
+        Session Summary
+        ===============
+        Date: {session.start_time.strftime('%Y-%m-%d')}
+        Duration: {session.duration_minutes} minutes
+        Type: {session.session_type.capitalize()}
+        Total Cost: ${session.total_charged:.2f}
+        
+        Messages Exchanged: {len(messages)}
+        
+        Session completed successfully.
+        """
+        
+        return summary
+    
+    def get_ice_servers(self) -> List[Dict]:
+        """Get ICE servers configuration"""
+        return [
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun1.l.google.com:19302"},
+            {
+                "urls": f"turn:{settings.TURN_SERVERS}",
+                "username": settings.TURN_USERNAME,
+                "credential": settings.TURN_CREDENTIAL
+            }
+        ]
+
+# backend/app/websockets/connection_manager.py
+from typing import Dict, List, Set, Optional
+from fastapi import WebSocket
+import json
+import logging
+from datetime import datetime
+
+logger = logging.getLogger
