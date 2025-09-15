@@ -1,0 +1,63 @@
+{
+  "name": "SoulSeer",
+  "short_name": "SoulSeer",
+  "description": "Connect with experienced psychic readers for live readings, tarot card readings, and spiritual guidance.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#ffffff",
+  "icons": [
+    {
+      "src": "/android-chrome-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png"
+    },
+    {
+      "src": "/android-chrome-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png"
+    },
+    {
+      "src": "/apple-touch-icon.png",
+      "sizes": "180x180",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "screenshots": [
+    {
+      "src": "/screenshot1.png",
+      "sizes": "1280x720",
+      "type": "image/png",
+      "form_factor": "wide"
+    },
+    {
+      "src": "/screenshot2.png",
+      "sizes": "750x1334",
+      "type": "image/png",
+      "form_factor": "narrow"
+    }
+  ],
+  "categories": ["lifestyle", "social"],
+  "shortcuts": [
+    {
+      "name": "Find a Reader",
+      "short_name": "Readers",
+      "description": "Browse our list of experienced readers",
+      "url": "/readers"
+    },
+    {
+      "name": "My Account",
+      "short_name": "Account",
+      "description": "View your account details",
+      "url": "/account"
+    }
+  ],
+  "prefer_related_applications": false,
+  "related_applications": [],
+  "scope": "/",
+  "orientation": "any",
+  "dir": "ltr",
+  "lang": "en-US",
+  "splash_pages": null
+}
