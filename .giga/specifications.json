@@ -1,0 +1,22 @@
+[
+  {
+    "fileName": "main-overview.mdc",
+    "description": "Complete system overview documenting the psychic reading platform architecture, key components, and high-level interactions between services"
+  },
+  {
+    "fileName": "reading-session-flow.mdc",
+    "description": "Detailed documentation of the reading session lifecycle, including real-time billing, state transitions, scheduling logic, and automated notifications"
+  },
+  {
+    "fileName": "data-models.mdc",
+    "description": "Comprehensive documentation of core data models (User, ReadingSession, Schedule, Review) and their relationships, with focus on reader profiles and session management"
+  },
+  {
+    "fileName": "billing-system.mdc",
+    "description": "Documentation of the per-minute billing implementation, payment processing, revenue sharing calculations, and automated payout workflows"
+  },
+  {
+    "fileName": "reader-marketplace.mdc",
+    "description": "Documentation of reader discovery system, availability management, scheduling algorithms, and rating/review mechanisms"
+  }
+]

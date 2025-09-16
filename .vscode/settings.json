@@ -1,0 +1,5 @@
+{
+    "traycer.enableAutoAnalysis": false,
+    "CodeGPT.apiKey": "OpenAI",
+    "codium.codeCompletion.enable": true
+}

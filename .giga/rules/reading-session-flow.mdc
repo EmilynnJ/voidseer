@@ -1,0 +1,59 @@
+---
+description: Handles the business logic for managing psychic reading sessions, including scheduling, billing, and notifications
+---
+
+
+# reading-session-flow
+
+Core Session Management Components:
+
+1. Session Lifecycle (backend/app/services/session_service.py)
+- Manages state transitions: SCHEDULED -> ACTIVE -> COMPLETED
+- Enforces pre-session balance verification
+- Handles grace period management for connection drops
+- Implements automated session termination on insufficient funds
+Importance Score: 95/100
+
+2. Real-Time Billing Flow (backend/app/services/billing_service.py)
+- Per-minute billing with reader-specific rates
+- Three-tiered pricing model (chat/audio/video)
+- Real-time balance monitoring
+- Automated payment capture every 5 minutes
+- Platform fee calculation (30% of transaction)
+Importance Score: 90/100
+
+3. Scheduling Logic (backend/app/models/reading_session.py)
+- Reader availability windows with timezone awareness
+- Conflict detection across different reading types
+- Automated buffer periods between sessions
+- Handles emergency/priority bookings
+Importance Score: 85/100
+
+4. Notification Workflow (backend/app/services/notification_service.py)
+- Automated session reminders (24h, 1h, 15min)
+- Real-time status updates for both parties
+- Balance warnings at 25% remaining
+- Post-session review prompts
+Importance Score: 75/100
+
+Domain-Specific Rules:
+1. Session Prerequisites
+- Minimum balance requirement (reader_rate * 15 minutes)
+- Reader verification status check
+- Client first-time session validation
+
+2. Revenue Distribution
+- Immediate hold of estimated session cost
+- Rolling payment capture every 5 minutes
+- Automated refund for unused time
+- Reader earnings calculation (70% of total)
+
+3. Session Termination Conditions
+- Insufficient balance
+- Extended disconnection (>3 minutes)
+- Reader/client manual end
+- Maximum duration reached (180 minutes)
+
+$END$
+
+ If you're using this file in context, clearly say in italics in one small line that "Context added by Giga reading-session-flow" along with specifying exactly what information was used from this file in a human-friendly way, instead of using kebab-case use normal sentence case.
